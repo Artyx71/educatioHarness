@@ -44,4 +44,10 @@ describe('persistent workflow transitions',()=>{
     const continued=await transitionWorkflow({goalId:'g',sessionId:'s1',instanceId:'s1',stepId:'teach',status:'running',input:{...input,answer:'Мой ответ'}});
     expect(continued.retry_count).toBe(0);
   });
+  it('keeps the retry count stable while a running step saves partial progress',async()=>{
+    await transitionWorkflow({goalId:'g',instanceId:'r',stepId:'review',status:'running',input:{},output:{exerciseIds:[]}});
+    const updated=await transitionWorkflow({goalId:'g',instanceId:'r',stepId:'review',status:'running',input:{},output:{exerciseIds:['e1']},progressUpdate:true});
+    expect(updated.retry_count).toBe(0);
+    expect(JSON.parse(updated.output).exerciseIds).toEqual(['e1']);
+  });
 });
