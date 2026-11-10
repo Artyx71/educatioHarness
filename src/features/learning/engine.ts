@@ -68,8 +68,16 @@ export async function resumeProbe(goalId:string,sessionId:string,config:Config) 
 
 export async function finishProbe(goalId:string,sessionId:string,answers:{question:string;answer:string;reasoning:string}[],config:Config) {
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
-  if(!snap.diagnostic_answers.some(a=>a.session_id===sessionId)) for(const a of answers) { await api.save('diagnostic_answers',{id:id(),session_id:sessionId,question:a.question,answer:a.answer,reasoning:a.reasoning,evaluation:'',created_at:now()}); await message(sessionId,'user',`${a.answer}\n\nХод мысли: ${a.reasoning}`,'diagnostic-answer'); }
-  await workflow(goalId,'probe','completed',{answers},{answered:answers.length});
+  for(const a of answers) {
+    const saved=snap.diagnostic_answers.find(item=>item.session_id===sessionId&&item.question===a.question);
+    if(!saved || saved.answer!==a.answer || saved.reasoning!==a.reasoning) {
+      await api.save('diagnostic_answers',{id:saved?.id??id(),session_id:sessionId,question:a.question,answer:a.answer,reasoning:a.reasoning,evaluation:saved?.evaluation??'',created_at:saved?.created_at??now()});
+    }
+    const content=`${a.question}\n\n${a.answer}\n\nХод мысли: ${a.reasoning}`;
+    if(!snap.messages.some(item=>item.session_id===sessionId&&item.kind==='diagnostic-answer'&&item.content===content)) await message(sessionId,'user',content,'diagnostic-answer');
+  }
+  const probeStep=snap.workflow_executions.find(item=>item.id===`${goalId}:probe`);
+  await workflow(goalId,'probe','completed',{answers},probeStep?.output?JSON.parse(probeStep.output):{answered:answers.length});
   await workflow(goalId,'evaluation','running',{answers});
   let evaluation:AgentResult<Evaluation>;
   try { evaluation=await call<Evaluation>(config,'evaluate_probe',{goal:goal.title,answers},sessionId); }
@@ -80,6 +88,8 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
   let curriculum:AgentResult<Curriculum>;
   try { curriculum=await call<Curriculum>(config,'curriculum',{goal:goal.title,answers,evaluation},sessionId); }
   catch(e) { await workflow(goalId,'curriculum',String(e).includes('отменён')?'cancelled':'failed',{evaluation},null,String(e)); throw e; }
+  // A previous attempt may have stopped while saving topics. Replace that partial plan before writing the new one.
+  for(const previous of snap.curricula.filter(item=>item.goal_id===goalId)) await api.remove('curricula',previous.id);
   const curriculumId=id(); await api.save('curricula',{id:curriculumId,goal_id:goalId,created_at:now(),updated_at:now()});
   const ids=new Map(curriculum.topics.map(t=>[t.id,id()]));
   const conceptIds=new Map(curriculum.topics.map(t=>[t.id,snap.knowledge_nodes.find(n=>n.goal_id===goalId&&n.kind==='concept'&&n.name.toLocaleLowerCase('ru')===t.title.toLocaleLowerCase('ru'))?.id??id()]));
