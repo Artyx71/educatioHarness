@@ -29,7 +29,7 @@ interface AgentProvider {
 class CodexProvider implements AgentProvider {
   async execute(prompt: string, schema: Record<string, unknown>, request: RequestType, onProgress: (chars: number) => void) {
     const codex = new Codex({ codexPathOverride: process.env.EDUCATIOHARNESS_CODEX_PATH || undefined });
-    const options = { ...(request.model === 'default' ? {} : {model:request.model}), sandboxMode: 'read-only' as const, approvalPolicy: 'never' as const, networkAccessEnabled: false, webSearchMode: 'disabled' as const, skipGitRepoCheck: true };
+    const options = { ...(request.model === 'default' ? {} : {model:request.model}), sandboxMode: 'read-only' as const, approvalPolicy: 'never' as const, networkAccessEnabled: false, webSearchMode: 'disabled' as const, workingDirectory: process.env.EDUCATIOHARNESS_AGENT_WORKSPACE, skipGitRepoCheck: true };
     const thread = request.sessionId ? codex.resumeThread(request.sessionId, options) : codex.startThread(options);
     const turn = await thread.runStreamed(prompt, { outputSchema: schema });
     let finalResponse = '';
