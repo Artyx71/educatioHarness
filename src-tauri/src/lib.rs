@@ -412,9 +412,12 @@ fn codex_logout(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_api_key(state: State<AppState>, key: String) -> Result<(), String> {
+async fn save_api_key(app: tauri::AppHandle, key: String, model: String) -> Result<(), String> {
     if !key.starts_with("sk-") || key.len() > 512 { return Err("Введите корректный ключ OpenAI API".into()); }
+    let request = AgentRequest { request_id: uuid::Uuid::new_v4().to_string(), operation: "validate".into(), provider: "openai".into(), model, input: json!({"question":"Проверь подключение"}), skill: String::new(), session_id: None };
+    execute_agent(app.clone(), request, Some(key.clone())).await.map_err(|error| format!("Ключ не сохранён: {error}"))?;
     keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e| e.to_string())?.set_password(&key).map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
     *state.api_key_saved.lock().map_err(|e|e.to_string())? = Some((true,Instant::now()));
     Ok(())
 }
@@ -481,11 +484,15 @@ fn cancel_agent(state: State<AppState>, request_id: String) -> Result<bool, Stri
 
 #[tauri::command]
 async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Value, String> {
+    execute_agent(app, request, None).await
+}
+
+async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_override: Option<String>) -> Result<Value, String> {
     if request.request_id.len() > 64 || request.request_id.is_empty() || !request.request_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { return Err("Invalid request ID".into()); }
     if !["probe","evaluate_probe","curriculum","teach","practice","evaluate_practice","extract","audit","validate"].contains(&request.operation.as_str()) { return Err("Invalid operation".into()); }
     if !["codex","openai"].contains(&request.provider.as_str()) { return Err("Invalid provider".into()); }
     if request.model.len() > 100 || request.skill.len() > 80 || request.input.to_string().len() > 200_000 { return Err("Request too large".into()); }
-    let key = if request.provider == "openai" { Some(keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e|e.to_string())?.get_password().map_err(|_|"No API key saved".to_string())?) } else { None };
+    let key = if request.provider == "openai" { Some(match key_override { Some(candidate) => candidate, None => keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e|e.to_string())?.get_password().map_err(|_|"No API key saved".to_string())? }) } else { None };
     let resource = app.path().resource_dir().map_err(|e|e.to_string())?;
     let bundled = resource.join("agent-runtime/main.mjs");
     let script = if bundled.exists() { bundled } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent-runtime/dist/main.js") };
