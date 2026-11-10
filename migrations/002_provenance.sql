@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS knowledge_provenance (id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES knowledge_nodes(id) ON DELETE CASCADE, session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL, message_id TEXT REFERENCES messages(id) ON DELETE SET NULL, created_at TEXT NOT NULL, UNIQUE(node_id,session_id,message_id));

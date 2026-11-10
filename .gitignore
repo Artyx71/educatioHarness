@@ -1,0 +1,12 @@
+node_modules/
+dist/
+agent-runtime/dist/
+agent-runtime/bundle/
+*.tsbuildinfo
+src-tauri/target/
+.references/
+.env*
+*.db
+*.db-*
+src-tauri/gen/
+src-tauri/binaries/
