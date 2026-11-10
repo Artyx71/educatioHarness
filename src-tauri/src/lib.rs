@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tauri::{Emitter, Manager, State};
 
-struct AppState { db: Mutex<Connection>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> }
+struct AppState { db: Mutex<Connection>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>> }
 
 #[derive(Serialize)]
 struct SkillMetadata { name: String, description: String, source: String }
@@ -302,6 +302,16 @@ fn codex_logged_in(success: bool, stdout: &str, stderr: &str) -> bool {
     success && (stdout.trim().starts_with("Logged in") || stderr.trim().starts_with("Logged in"))
 }
 
+fn cached_api_key_status<F: FnOnce() -> bool>(cache: &Mutex<Option<(bool, Instant)>>, read: F) -> bool {
+    let Ok(mut cached) = cache.lock() else { return false; };
+    if let Some((value, checked)) = *cached {
+        if checked.elapsed() < Duration::from_secs(60) { return value; }
+    }
+    let value = read();
+    *cached = Some((value, Instant::now()));
+    value
+}
+
 fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
     let filename = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
     let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join(&filename);
@@ -312,7 +322,7 @@ fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String>
 }
 
 #[tauri::command]
-fn auth_status(app: tauri::AppHandle) -> AuthStatus {
+fn auth_status(app: tauri::AppHandle, state: State<AppState>) -> AuthStatus {
     let status = bundled_binary(&app, "educatioharness-codex").and_then(|path| Command::new(path).args(["login","status"]).output().map_err(|e|e.to_string()));
     let (installed, authenticated, detail) = match status {
         Ok(o) => {
@@ -323,7 +333,9 @@ fn auth_status(app: tauri::AppHandle) -> AuthStatus {
         },
         Err(e) => (false, false, e.to_string()),
     };
-    let saved = keyring::Entry::new("educatio-harness", "openai-api-key").ok().and_then(|e|e.get_password().ok()).is_some();
+    let saved = cached_api_key_status(&state.api_key_saved, || {
+        keyring::Entry::new("educatio-harness", "openai-api-key").ok().and_then(|entry|entry.get_password().ok()).is_some()
+    });
     AuthStatus { codex_installed: installed, codex_authenticated: authenticated, api_key_saved: saved, detail }
 }
 
@@ -340,15 +352,22 @@ fn codex_logout(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn save_api_key(key: String) -> Result<(), String> {
-    if !key.starts_with("sk-") || key.len() > 512 { return Err("Enter a valid OpenAI API key".into()); }
-    keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e| e.to_string())?.set_password(&key).map_err(|e| e.to_string())
+fn save_api_key(state: State<AppState>, key: String) -> Result<(), String> {
+    if !key.starts_with("sk-") || key.len() > 512 { return Err("Введите корректный ключ OpenAI API".into()); }
+    keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e| e.to_string())?.set_password(&key).map_err(|e| e.to_string())?;
+    *state.api_key_saved.lock().map_err(|e|e.to_string())? = Some((true,Instant::now()));
+    Ok(())
 }
 
 #[tauri::command]
-fn remove_api_key() -> Result<(), String> { keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e| e.to_string())?.delete_credential().map_err(|e|e.to_string()) }
+fn remove_api_key(state: State<AppState>) -> Result<(), String> {
+    keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e| e.to_string())?.delete_credential().map_err(|e|e.to_string())?;
+    *state.api_key_saved.lock().map_err(|e|e.to_string())? = Some((false,Instant::now()));
+    Ok(())
+}
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AgentRequest { request_id: String, operation: String, provider: String, model: String, input: Value, skill: String, session_id: Option<String> }
 
 fn wait_for_agent<F: Fn(&str) + Send + 'static>(mut child: Child, cancelled: &AtomicBool, timeout: Duration, on_line: F) -> Result<Output, String> {
@@ -463,7 +482,7 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = open_db().expect("Cannot initialize local database");
-    tauri::Builder::default().manage(AppState { db: Mutex::new(db), runs: Arc::new(Mutex::new(HashMap::new())) })
+    tauri::Builder::default().manage(AppState { db: Mutex::new(db), runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_obsidian])
         .on_window_event(|window, event| {
@@ -486,6 +505,31 @@ mod tests {
         assert!(codex_logged_in(true, "Logged in using ChatGPT", ""));
         assert!(!codex_logged_in(false, "", "Logged in using ChatGPT"));
         assert!(!codex_logged_in(true, "", "Not logged in"));
+    }
+    #[test]
+    fn api_key_status_cache_avoids_repeated_secret_store_reads() {
+        let cache = Mutex::new(None);
+        let mut reads = 0;
+        assert!(cached_api_key_status(&cache, || { reads += 1; true }));
+        assert!(cached_api_key_status(&cache, || { reads += 1; false }));
+        assert_eq!(reads,1);
+        *cache.lock().unwrap() = Some((true,Instant::now()-Duration::from_secs(61)));
+        assert!(!cached_api_key_status(&cache, || { reads += 1; false }));
+        assert_eq!(reads,2);
+    }
+    #[test]
+    fn agent_request_accepts_frontend_camel_case_fields() {
+        let request: AgentRequest = serde_json::from_value(json!({
+            "requestId":"probe-request",
+            "operation":"probe",
+            "provider":"codex",
+            "model":"default",
+            "input":{"goal":"Изучить C"},
+            "skill":"knowledge-probe",
+            "sessionId":"session-id"
+        })).unwrap();
+        assert_eq!(request.request_id,"probe-request");
+        assert_eq!(request.session_id.as_deref(),Some("session-id"));
     }
     #[test]
     fn migration_is_versioned_and_reentrant() {
