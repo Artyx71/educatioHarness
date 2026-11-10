@@ -99,17 +99,18 @@ function PracticePage({goalId,topics,snap,config,busy,run}:{goalId?:string;topic
 function History({snap,onOpen}:{snap:Snapshot;onOpen:(id:string)=>void}){return <div className="page"><span className="eyebrow">ИСТОРИЯ</span><h1>Учебные занятия</h1><div className="panel list-panel">{snap.sessions.length?snap.sessions.slice().reverse().map(s=><button className="history-row" key={s.id} onClick={()=>onOpen(s.id)}><div><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)} · {snap.messages.filter(m=>m.session_id===s.id).length} сообщений</small></div><ArrowRight size={16}/></button>):<p className="muted">Занятий пока нет.</p>}</div></div>}
 
 function Settings({auth,provider,model,busy,run,saveConfig,refreshAuth,savedDirectories,savedOverrides}:{auth?:AuthStatus;provider:Provider;model:string;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void;saveConfig:(p:Provider,m:string)=>Promise<void>;refreshAuth:()=>Promise<unknown>;savedDirectories:string;savedOverrides:string}){
-  const [key,setKey]=useState('');const [localModel,setLocalModel]=useState(model);const [message,setMessage]=useState('');
-  useEffect(()=>setLocalModel(model),[model]);
-  const config={provider,model:localModel||(provider==='codex'?'default':'gpt-5.4')};
+  const [key,setKey]=useState('');const [message,setMessage]=useState('');
+  const modelOptions=provider==='codex'?[{id:'default',label:'Авто',hint:'Выбор Codex'},{id:'gpt-5.4',label:'GPT-5.4',hint:'Фиксированная'}]:[{id:'gpt-5.4',label:'GPT-5.4',hint:'Точнее'},{id:'gpt-5.4-mini',label:'GPT-5.4 mini',hint:'Быстрее'}];
+  const activeModel=model||(provider==='codex'?'default':'gpt-5.4');
+  const modelChoices=modelOptions.some(option=>option.id===activeModel)?modelOptions:[...modelOptions,{id:activeModel,label:activeModel,hint:'Ранее выбранная'}];
+  const config={provider,model:activeModel};
   return <div className="page settings-page">
     <span className="eyebrow">ПАРАМЕТРЫ</span><h1>Настройки</h1>
     <div className="settings-grid">
       <div className="panel">
         <h2>Провайдер ИИ</h2><p>ChatGPT использует сессию Codex CLI. Запросы по API-ключу оплачиваются отдельно.</p>
         <label>Провайдер<select value={provider} onChange={e=>run('Смена провайдера',()=>saveConfig(e.target.value as Provider,e.target.value==='codex'?'default':'gpt-5.4'))}><option value="codex">ChatGPT через Codex</option><option value="openai">Ключ OpenAI API</option></select></label>
-        <label>Модель<input value={localModel} onChange={e=>setLocalModel(e.target.value)} placeholder="default (модель из Codex CLI)"/></label>
-        <button className="button secondary" onClick={()=>run('Сохранение модели',()=>saveConfig(provider,localModel||'default'))}>Сохранить модель</button>
+        <div className="model-picker"><span>Модель</span><div className="model-toggle" role="group" aria-label="Выбор модели">{modelChoices.map(option=><button key={option.id} type="button" className={activeModel===option.id?'active':''} aria-pressed={activeModel===option.id} disabled={!!busy} onClick={()=>run('Смена модели',()=>saveConfig(provider,option.id))}><strong>{option.label}</strong><small>{option.hint}</small></button>)}</div></div>
         <div className="connection"><span className={`status ${provider==='codex'?auth?.codex_authenticated?'online':'offline':auth?.api_key_saved?'online':'offline'}`}><span/>{provider==='codex'?(auth?.codex_authenticated?'Вход выполнен':'Нет подключения'):auth?.api_key_saved?'API-ключ сохранён':'API-ключ не сохранён'}</span><button className="button secondary" disabled={!!busy} onClick={()=>run('Проверка подключения',async()=>{const r=await api.agent<{connected:boolean;message:string}>('validate',config.provider,config.model,{question:'Проверь подключение'},'');setMessage(r.message)})}>Проверить подключение</button>{message&&<p className="muted">{message}</p>}</div>
       </div>
       <div className="panel">
