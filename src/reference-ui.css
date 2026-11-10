@@ -97,3 +97,4 @@ select{color-scheme:dark}
 .math-answer{margin:15px 0}.math-preview{margin-top:8px;min-height:65px;padding:10px 12px;background:#181818;border:1px solid #353535;border-radius:7px}.math-preview .markdown{font-size:12px;overflow:auto}
 .react-flow__node.graph-dimmed{opacity:.4}.react-flow__node.graph-related{border-color:#a9bfac;color:#f3f3f3}.graph-relation{padding:7px 0;border-bottom:1px solid #383838}.graph-relation small{color:#8fa593}.graph-relation p{margin:4px 0;color:#ccc;font-size:11px}
 @media(max-width:800px){.topic-dashboard,.activity-dashboard{width:min(390px,calc(100vw - 220px))}.answer-toolbar span:last-child{display:none}}
+@media(prefers-reduced-motion:reduce){.study-card,.study-card.revealed{animation:none;transition:none}}
