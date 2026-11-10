@@ -1,4 +1,7 @@
-import ReactMarkdown from 'react-markdown';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
-export function Markdown({children}:{children:string}) { return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{children}</ReactMarkdown></div>; }
+import { lazy, Suspense } from 'react';
+
+const MarkdownRenderer = lazy(() => import('./MarkdownRenderer'));
+
+export function Markdown({children}:{children:string}) {
+  return <Suspense fallback={<div className="markdown">{children}</div>}><MarkdownRenderer>{children}</MarkdownRenderer></Suspense>;
+}
