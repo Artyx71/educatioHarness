@@ -218,7 +218,7 @@ fn snapshot(state: State<AppState>) -> Result<Value, String> {
     let names = ["learning_goals","sessions","messages","diagnostic_answers","curricula","topics","exercises","attempts","knowledge_nodes","knowledge_edges","knowledge_provenance","workflow_executions","agent_executions","preferences"];
     let mut out = serde_json::Map::new();
     for name in names {
-        let mut stmt = db.prepare(&format!("SELECT * FROM {name}")).map_err(|e| e.to_string())?;
+        let mut stmt = db.prepare(&format!("SELECT * FROM {name} ORDER BY {}", snapshot_order(name))).map_err(|e| e.to_string())?;
         let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let rows = stmt.query_map([], |row| {
             let mut item = serde_json::Map::new();
@@ -238,6 +238,15 @@ fn snapshot(state: State<AppState>) -> Result<Value, String> {
         out.insert(name.into(), json!(values.map_err(|e| e.to_string())?));
     }
     Ok(Value::Object(out))
+}
+
+fn snapshot_order(table: &str) -> &'static str {
+    match table {
+        "learning_goals" | "sessions" | "curricula" | "workflow_executions" => "updated_at, id",
+        "topics" => "curriculum_id, position, id",
+        "preferences" => "key",
+        _ => "created_at, id",
+    }
 }
 
 #[tauri::command]
@@ -487,6 +496,17 @@ mod tests {
         assert_eq!(version,2);
         conn.execute("INSERT INTO learning_goals VALUES ('g','C','t','t')",[]).unwrap();
         assert!(conn.execute("INSERT INTO sessions VALUES ('s','missing','probe','C','t','t')",[]).is_err());
+    }
+    #[test]
+    fn snapshots_order_recent_goals_and_sessions_by_update_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute("INSERT INTO learning_goals VALUES ('newer-created','C','2026-02-01','2026-02-01')",[]).unwrap();
+        conn.execute("INSERT INTO learning_goals VALUES ('recently-used','Rust','2026-01-01','2026-03-01')",[]).unwrap();
+        let query = format!("SELECT id FROM learning_goals ORDER BY {}",snapshot_order("learning_goals"));
+        let ids: Vec<String> = conn.prepare(&query).unwrap().query_map([],|row|row.get(0)).unwrap().collect::<Result<_,_>>().unwrap();
+        assert_eq!(ids,vec!["newer-created","recently-used"]);
+        assert_eq!(snapshot_order("topics"),"curriculum_id, position, id");
     }
     #[test]
     #[cfg(unix)]
