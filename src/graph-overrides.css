@@ -1,2 +1,6 @@
 .graph-detail input,.graph-detail textarea{margin-top:12px}.graph-detail textarea{min-height:110px}.graph-detail .button{margin-top:10px}.graph-detail{width:290px}
 .topic-editor{border-top:1px solid #293440;margin:20px 8px;padding:20px 2px}.topic-editor input,.topic-editor textarea,.topic-editor select{margin-top:12px}.topic-editor textarea{min-height:68px}.topic-editor .button{margin-top:10px;margin-right:4px}
+.graph-source{border:1px solid #363636;border-radius:6px;background:#1c1c1c;margin:7px 0;padding:9px;color:#bfbfbf;font-size:11px}
+.graph-source summary{cursor:pointer;line-height:1.4}
+.graph-source .markdown{max-height:210px;overflow:auto;border-top:1px solid #363636;margin-top:9px;padding-top:8px;font-size:11px}
+.graph-source .text-button{margin-top:6px}
