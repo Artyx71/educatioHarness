@@ -308,9 +308,14 @@ fn save_record(state: State<AppState>, table: String, record: Value) -> Result<(
 
 #[tauri::command]
 fn delete_record(state: State<AppState>, table: String, id: String) -> Result<(), String> {
-    if !["topics","knowledge_nodes","knowledge_edges","exercises","learning_goals"].contains(&table.as_str()) { return Err("Unsupported delete".into()); }
+    let db=state.db.lock().map_err(|e|e.to_string())?;
+    delete_record_db(&db,&table,&id)
+}
+
+fn delete_record_db(db: &Connection, table: &str, id: &str) -> Result<(), String> {
+    if !["curricula","topics","knowledge_nodes","knowledge_edges","exercises","learning_goals"].contains(&table) { return Err("Unsupported delete".into()); }
     if id.len() > 128 || id.is_empty() { return Err("Invalid ID".into()); }
-    state.db.lock().map_err(|e| e.to_string())?.execute(&format!("DELETE FROM {table} WHERE id=?"), params![id]).map_err(|e| e.to_string())?;
+    db.execute(&format!("DELETE FROM {table} WHERE id=?"), params![id]).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -603,6 +608,22 @@ mod tests {
         assert_eq!(title,"C");
         drop(source);
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn interrupted_curriculum_can_be_replaced_without_orphaned_topic_links() {
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute("INSERT INTO learning_goals VALUES ('g','C','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO curricula VALUES ('c','g','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO topics VALUES ('topic','c','Указатели','desc','[]','[]','beginner','pending',0)",[]).unwrap();
+        conn.execute("INSERT INTO knowledge_nodes VALUES ('node','g','concept','Указатели','desc',NULL,NULL,'t')",[]).unwrap();
+        conn.execute("INSERT INTO knowledge_topic_links VALUES ('node','topic')",[]).unwrap();
+        delete_record_db(&conn,"curricula","c").unwrap();
+        let topics:i64=conn.query_row("SELECT count(*) FROM topics",[],|row|row.get(0)).unwrap();
+        let links:i64=conn.query_row("SELECT count(*) FROM knowledge_topic_links",[],|row|row.get(0)).unwrap();
+        assert_eq!((topics,links),(0,0));
+        assert!(delete_record_db(&conn,"messages","anything").is_err());
     }
     #[test]
     fn snapshots_order_recent_goals_and_sessions_by_update_time() {
