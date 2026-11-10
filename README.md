@@ -2,6 +2,8 @@
 
 Локальное настольное приложение для персонального обучения с настоящими вызовами ИИ. Основа — Tauri 2, React, SQLite и отдельный Node.js runtime. Интерфейс на русском языке.
 
+![Главный экран educatioHarness в тёмной теме](docs/assets/dashboard.png)
+
 ## Запуск на Linux, Windows и macOS
 
 Нужны Node.js 22+, Rust stable и системные библиотеки Tauri 2. На Linux: WebKitGTK 4.1, GTK 3, libsoup 3, pkg-config и Secret Service (GNOME Keyring или KWallet). На Windows: Microsoft C++ Build Tools и WebView2; на macOS: Xcode Command Line Tools. Подробнее: [системные зависимости Tauri](https://v2.tauri.app/start/prerequisites/). Для ChatGPT приложение комплектуется официальным бинарником Codex и использует его штатный вход; существующая сессия `codex login` также доступна. Для альтернативы нужен OpenAI API-ключ.
