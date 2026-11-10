@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tauri::{Emitter, Manager, State};
 
-struct AppState { db: Mutex<Connection>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>> }
+struct AppState { db: Mutex<Connection>, startup_error: Option<String>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>> }
 
 #[derive(Serialize)]
 struct SkillMetadata { name: String, description: String, source: String }
@@ -379,6 +379,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 
 #[tauri::command]
 fn snapshot(state: State<AppState>) -> Result<Value, String> {
+    if let Some(error)=&state.startup_error { return Err(format!("Не удалось открыть базу данных: {error}")); }
     let db = state.db.lock().map_err(|e| e.to_string())?;
     let names = ["learning_goals","sessions","messages","diagnostic_answers","curricula","topics","exercises","attempts","knowledge_nodes","knowledge_edges","knowledge_topic_links","knowledge_provenance","workflow_executions","agent_executions","preferences"];
     let mut out = serde_json::Map::new();
@@ -673,8 +674,11 @@ async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_overrid
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let db = open_db().expect("Cannot initialize local database");
-    tauri::Builder::default().manage(AppState { db: Mutex::new(db), runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
+    let (db,startup_error)=match open_db() {
+        Ok(db)=>(db,None),
+        Err(error)=>(Connection::open_in_memory().expect("Cannot create error state"),Some(error)),
+    };
+    tauri::Builder::default().manage(AppState { db: Mutex::new(db), startup_error, runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_obsidian])
         .on_window_event(|window, event| {

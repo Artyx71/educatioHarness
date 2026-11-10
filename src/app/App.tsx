@@ -51,7 +51,7 @@ export default function App() {
   }
   async function saveConfig(p:Provider,m:string){setProvider(p);setModel(m);await api.save('preferences',{key:'provider',value:p});await api.save('preferences',{key:'model',value:m});await refresh()}
   const mustConnect=!connected;
-  if(dbError) return <div className="fatal">Ошибка базы данных: {String(dbError)}</div>;
+  if(dbError) return <div className="fatal"><h1>Не удалось открыть данные</h1><p>{String(dbError)}</p><p>Проверьте доступность выбранного каталога и запустите приложение снова. Существующая база не заменялась пустой.</p></div>;
   return <div className="app"><aside className="sidebar ref-sidebar">
     <button className="brand ref-brand" onClick={()=>ui.setPage('dashboard')} aria-label="На главную"><div className="brand-mark"><img src={brandIcon} alt=""/></div><div>educatioHarness</div></button>
     <div className="sidebar-actions"><button onClick={()=>{ui.setGoal('');ui.setSession('');ui.setPage('learn')}}><Plus size={15}/> ОБУЧЕНИЕ</button>{goal&&topics.length>0&&<button disabled={!!busy} onClick={()=>run('Новое занятие',async()=>{const next=await startLearningSession(goal.id);ui.setSession(next);ui.setPage('learn')})}><BookOpen size={15}/> НОВОЕ ЗАНЯТИЕ</button>}<button onClick={()=>ui.setPage('practice')}><Dumbbell size={15}/> ПРАКТИКА</button></div>
