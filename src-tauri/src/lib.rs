@@ -315,6 +315,14 @@ fn delete_record(state: State<AppState>, table: String, id: String) -> Result<()
 fn delete_record_db(db: &Connection, table: &str, id: &str) -> Result<(), String> {
     if !["curricula","topics","knowledge_nodes","knowledge_edges","exercises","learning_goals"].contains(&table) { return Err("Unsupported delete".into()); }
     if id.len() > 128 || id.is_empty() { return Err("Invalid ID".into()); }
+    if table == "topics" {
+        let mut stmt=db.prepare("SELECT prerequisites FROM topics WHERE id!=?1 AND curriculum_id=(SELECT curriculum_id FROM topics WHERE id=?1)").map_err(|e|e.to_string())?;
+        let rows=stmt.query_map(params![id],|row|row.get::<_,String>(0)).map_err(|e|e.to_string())?;
+        for row in rows {
+            let prerequisites:Vec<String>=serde_json::from_str(&row.map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+            if prerequisites.iter().any(|value|value==id) { return Err("Сначала уберите тему из предпосылок других тем".into()); }
+        }
+    }
     db.execute(&format!("DELETE FROM {table} WHERE id=?"), params![id]).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -624,6 +632,21 @@ mod tests {
         let links:i64=conn.query_row("SELECT count(*) FROM knowledge_topic_links",[],|row|row.get(0)).unwrap();
         assert_eq!((topics,links),(0,0));
         assert!(delete_record_db(&conn,"messages","anything").is_err());
+    }
+    #[test]
+    fn prerequisite_topic_cannot_be_deleted_until_dependencies_are_removed() {
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute("INSERT INTO learning_goals VALUES ('g','C','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO curricula VALUES ('c','g','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO topics VALUES ('base','c','Память','desc','[]','[]','beginner','pending',0)",[]).unwrap();
+        conn.execute("INSERT INTO topics VALUES ('next','c','Указатели','desc','[\"base\"]','[]','beginner','pending',1)",[]).unwrap();
+        assert!(delete_record_db(&conn,"topics","base").unwrap_err().contains("предпосылок"));
+        conn.execute("UPDATE topics SET prerequisites='[]' WHERE id='next'",[]).unwrap();
+        delete_record_db(&conn,"topics","base").unwrap();
+        let remaining:i64=conn.query_row("SELECT count(*) FROM topics",[],|row|row.get(0)).unwrap();
+        assert_eq!(remaining,1);
     }
     #[test]
     fn snapshots_order_recent_goals_and_sessions_by_update_time() {
