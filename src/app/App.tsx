@@ -72,7 +72,7 @@ function Dashboard({snap,goalId,busy,onStart,onPractice,onCreate}:{snap:Snapshot
   const curriculum=snap.curricula.find(c=>c.goal_id===goal?.id);
   const goalTopics=snap.topics.filter(t=>t.curriculum_id===curriculum?.id).sort((a,b)=>a.position-b.position);
   const dayKey=(date:Date)=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
-  const activeDays=new Set([...snap.sessions.map(s=>dayKey(new Date(s.updated_at))),...snap.attempts.map(a=>dayKey(new Date(a.created_at)))]);
+  const activeDays=new Set([...snap.sessions.map(s=>dayKey(new Date(s.created_at))),...snap.messages.map(m=>dayKey(new Date(m.created_at))),...snap.attempts.map(a=>dayKey(new Date(a.created_at)))]);
   const days=Array.from({length:35},(_,i)=>{const day=new Date();day.setDate(day.getDate()-34+i);return dayKey(day)});
   let streak=0;for(let i=days.length-1-(activeDays.has(days.at(-1)??'')?0:1);i>=0&&activeDays.has(days[i]);i--)streak++;
   return <div className="reference-home">

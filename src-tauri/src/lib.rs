@@ -113,6 +113,10 @@ fn inspect_backup_file(path: &std::path::Path) -> Result<BackupInfo, String> {
     Ok(BackupInfo { goals:count("learning_goals")?, sessions:count("sessions")?, attempts:count("attempts")?, version })
 }
 
+fn is_live_database_path(db: &Connection, path: &std::path::Path) -> bool {
+    db.path().is_some_and(|current| path.exists() && path.canonicalize().ok() == PathBuf::from(current).canonicalize().ok())
+}
+
 #[tauri::command]
 fn inspect_backup(path: String) -> Result<BackupInfo, String> { inspect_backup_file(&backup_path(&path,true)?) }
 
@@ -122,6 +126,7 @@ fn export_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
     let temporary = destination.with_extension(format!("{}.sqlite3", uuid::Uuid::new_v4()));
     let result = (|| {
         let source = state.db.lock().map_err(|e|e.to_string())?;
+        if is_live_database_path(&source,&destination) { return Err("Нельзя экспортировать поверх открытой базы приложения".into()); }
         let mut copy = Connection::open(&temporary).map_err(|e|e.to_string())?;
         Backup::new(&source,&mut copy).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
         drop(copy);
@@ -140,6 +145,7 @@ fn import_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
     let info = inspect_backup_file(&source_path)?;
     let source = Connection::open_with_flags(&source_path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
     let mut target = state.db.lock().map_err(|e|e.to_string())?;
+    if is_live_database_path(&target,&source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
     let safety_path = app_dir()?.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
     let mut safety = Connection::open(&safety_path).map_err(|e|e.to_string())?;
     Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
@@ -514,6 +520,7 @@ mod tests {
         migrate(&source).unwrap();
         source.execute("INSERT INTO learning_goals VALUES ('goal','Изучить C','now','now')",[]).unwrap();
         let mut archive = Connection::open(&path).unwrap();
+        assert!(is_live_database_path(&archive,&path));
         Backup::new(&source,&mut archive).unwrap().run_to_completion(100,Duration::from_millis(1),None).unwrap();
         drop(archive);
         let info = inspect_backup_file(&path).unwrap();
