@@ -39,7 +39,7 @@ export function Graph({nodes,edges,sessions,messages,provenance,onSave,onDelete,
     const visible = nodes.filter(node=>`${node.name} ${node.statement}`.toLowerCase().includes(filter.toLowerCase()));
     const ids = new Set(visible.map(node=>node.id));
     const layout = new dagre.graphlib.Graph();
-    layout.setGraph({rankdir:'LR',nodesep:36,ranksep:130});
+    layout.setGraph({rankdir:'TB',nodesep:28,ranksep:55});
     layout.setDefaultEdgeLabel(()=>({}));
     visible.forEach(node=>layout.setNode(node.id,{width:210,height:70}));
     const flowEdges:Edge[]=[];
@@ -66,7 +66,7 @@ export function Graph({nodes,edges,sessions,messages,provenance,onSave,onDelete,
   return <div className="graph-page">
     <div className="section-head"><div><h1>Граф знаний</h1><p>Понятия, утверждения и связи из занятий. Наличие в графе не доказывает усвоение.</p></div><input placeholder="Поиск по графу" value={filter} onChange={event=>setFilter(event.target.value)}/></div>
     <div className="graph-frame">
-      <ReactFlow nodes={graph.flowNodes} edges={graph.flowEdges} onNodeClick={(_,node)=>{const value=nodes.find(item=>item.id===node.id);setSelectedId(value?.id??null);setDraft({name:value?.name??'',statement:value?.statement??''})}} fitView><Background color="#262626" gap={24}/><Controls/><MiniMap/></ReactFlow>
+      <ReactFlow nodes={graph.flowNodes} edges={graph.flowEdges} onNodeClick={(_,node)=>{const value=nodes.find(item=>item.id===node.id);setSelectedId(value?.id??null);setDraft({name:value?.name??'',statement:value?.statement??''})}} fitView><Background color="#262626" gap={24}/><Controls/>{graph.flowNodes.length>20&&<MiniMap bgColor="#1b1b1b" maskColor="#0008" nodeColor={node=>node.className?.includes('graph-concept')?'#777':'#a9bfac'}/>}</ReactFlow>
       {selected&&<aside className="graph-detail">
         <button className="icon-button" onClick={()=>setSelectedId(null)} aria-label="Закрыть детали">×</button>
         <small>{selected.kind==='concept'?'Понятие':'Утверждение'}</small>
