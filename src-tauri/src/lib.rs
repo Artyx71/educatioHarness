@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{backup::Backup, params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
@@ -86,6 +86,102 @@ fn open_db() -> Result<Connection, String> {
     conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;").map_err(|e| e.to_string())?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+#[derive(Serialize)]
+struct BackupInfo { goals: i64, sessions: i64, attempts: i64, version: i64 }
+
+fn backup_path(path: &str, must_exist: bool) -> Result<PathBuf, String> {
+    let file = PathBuf::from(path);
+    if !file.is_absolute() || file.extension().and_then(|s|s.to_str()) != Some("sqlite3") || path.len() > 4096 { return Err("Выберите абсолютный путь к файлу .sqlite3".into()); }
+    if must_exist {
+        let meta = std::fs::symlink_metadata(&file).map_err(|e|e.to_string())?;
+        if !meta.file_type().is_file() || meta.len() > 500_000_000 { return Err("Некорректный файл или архив больше 500 МБ".into()); }
+    } else if file.exists() && !std::fs::symlink_metadata(&file).map_err(|e|e.to_string())?.file_type().is_file() { return Err("Путь назначения должен быть обычным файлом".into()); }
+    Ok(file)
+}
+
+fn inspect_backup_file(path: &std::path::Path) -> Result<BackupInfo, String> {
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
+    let integrity: String = db.query_row("PRAGMA integrity_check", [], |r|r.get(0)).map_err(|e|e.to_string())?;
+    if integrity != "ok" { return Err("Файл базы данных повреждён".into()); }
+    let version: i64 = db.query_row("PRAGMA user_version", [], |r|r.get(0)).map_err(|e|e.to_string())?;
+    if version != 2 { return Err(format!("Версия данных {version} не поддерживается (ожидается 2)")); }
+    let foreign_keys: i64 = db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r|r.get(0)).map_err(|e|e.to_string())?;
+    if foreign_keys != 0 { return Err("В архиве нарушены связи данных".into()); }
+    let count = |table: &str| db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r|r.get(0)).map_err(|e|e.to_string());
+    Ok(BackupInfo { goals:count("learning_goals")?, sessions:count("sessions")?, attempts:count("attempts")?, version })
+}
+
+#[tauri::command]
+fn inspect_backup(path: String) -> Result<BackupInfo, String> { inspect_backup_file(&backup_path(&path,true)?) }
+
+#[tauri::command]
+fn export_backup(state: State<AppState>, path: String) -> Result<BackupInfo, String> {
+    let destination = backup_path(&path,false)?;
+    let temporary = destination.with_extension(format!("{}.sqlite3", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let source = state.db.lock().map_err(|e|e.to_string())?;
+        let mut copy = Connection::open(&temporary).map_err(|e|e.to_string())?;
+        Backup::new(&source,&mut copy).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
+        drop(copy);
+        let info = inspect_backup_file(&temporary)?;
+        std::fs::copy(&temporary,&destination).map_err(|e|e.to_string())?;
+        Ok(info)
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+#[tauri::command]
+fn import_backup(state: State<AppState>, path: String) -> Result<BackupInfo, String> {
+    if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
+    let source_path = backup_path(&path,true)?;
+    let info = inspect_backup_file(&source_path)?;
+    let source = Connection::open_with_flags(&source_path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
+    let mut target = state.db.lock().map_err(|e|e.to_string())?;
+    let safety_path = app_dir()?.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
+    let mut safety = Connection::open(&safety_path).map_err(|e|e.to_string())?;
+    Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
+    drop(safety);
+    Backup::new(&source,&mut target).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
+    target.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides')",[]).map_err(|e|e.to_string())?;
+    Ok(info)
+}
+
+#[tauri::command]
+fn export_obsidian(state: State<AppState>, directory: String) -> Result<String, String> {
+    let vault = PathBuf::from(&directory);
+    if !vault.is_absolute() || directory.len() > 4096 || !std::fs::symlink_metadata(&vault).map_err(|e|e.to_string())?.file_type().is_dir() { return Err("Выберите существующий каталог заметок".into()); }
+    let db = state.db.lock().map_err(|e|e.to_string())?;
+    let goals: Vec<(String,String)> = db.prepare("SELECT id,title FROM learning_goals ORDER BY created_at")
+        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
+        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+    let topics: Vec<(String,String,String,String)> = db.prepare("SELECT c.goal_id,t.title,t.description,t.id FROM topics t JOIN curricula c ON c.id=t.curriculum_id ORDER BY t.position")
+        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e|e.to_string())?
+        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+    let claims: Vec<(String,String,String,String)> = db.prepare("SELECT goal_id,name,statement,COALESCE(source_session_id,'') FROM knowledge_nodes WHERE kind='proposition' ORDER BY created_at")
+        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e|e.to_string())?
+        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+    let folder = vault.join(format!("educatioHarness-{}",&uuid::Uuid::new_v4().to_string()[..8]));
+    std::fs::create_dir(&folder).map_err(|e|e.to_string())?;
+    let mut index = String::from("# educatioHarness — учебные заметки\n\nЭкспорт идей и плана. Утверждение в графе не доказывает понимание.\n\n");
+    for (goal_index,(goal_id,title)) in goals.iter().enumerate() {
+        let filename = format!("Цель-{}.md",goal_index+1);
+        index.push_str(&format!("- [[Цель-{}|{}]]\n",goal_index+1,title.replace(['\n','|']," ")));
+        let mut body = format!("# {}\n\n## Темы\n\n",title);
+        for (topic_index,(_,name,description,_)) in topics.iter().enumerate().filter(|(_,t)|&t.0==goal_id) {
+            body.push_str(&format!("- [[Тема-{}|{}]]\n",topic_index+1,name.replace(['\n','|']," ")));
+            std::fs::write(folder.join(format!("Тема-{}.md",topic_index+1)),format!("# {}\n\n{}\n",name,description)).map_err(|e|e.to_string())?;
+        }
+        body.push_str("\n## Утверждения из графа\n\n");
+        for (_,name,statement,source) in claims.iter().filter(|c|&c.0==goal_id) {
+            body.push_str(&format!("### {}\n\n{}\n\nИсточник: занятие `{}`. Это запись модели, не доказательство усвоения.\n\n",name,statement,source));
+        }
+        std::fs::write(folder.join(filename),body).map_err(|e|e.to_string())?;
+    }
+    std::fs::write(folder.join("Обзор.md"),index).map_err(|e|e.to_string())?;
+    Ok(folder.display().to_string())
 }
 
 fn migrate(conn: &Connection) -> Result<(), String> {
@@ -308,6 +404,8 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
         let db = state.db.lock().map_err(|e|e.to_string())?;
         skill_directories(&db)?
     };
+    let agent_workspace = app_dir()?.join("agent-workspace");
+    std::fs::create_dir_all(&agent_workspace).map_err(|e|e.to_string())?;
     let payload = json!({"operation":request.operation,"provider":request.provider,"model":request.model,"input":request.input,"skill":request.skill,"skillDirectories":extra_skills,"sessionId":request.session_id});
     let runs = app.state::<AppState>().runs.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -323,6 +421,8 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
         let runtime_dir = script.parent().ok_or("Agent runtime path is invalid")?;
         command.arg(&script).current_dir(runtime_dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command.env("EDUCATIOHARNESS_SKILLS_DIR", skills);
+        command.env("EDUCATIOHARNESS_AGENT_WORKSPACE", agent_workspace);
+        command.env_remove("OPENAI_API_KEY");
         if let Some(path) = codex_binary { command.env("EDUCATIOHARNESS_CODEX_PATH", path); }
         if let Some(key) = key { command.env("OPENAI_API_KEY", key); }
         let mut child = command.spawn().map_err(|e| format!("Cannot start agent runtime: {e}"))?;
@@ -349,7 +449,8 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
 pub fn run() {
     let db = open_db().expect("Cannot initialize local database");
     tauri::Builder::default().manage(AppState { db: Mutex::new(db), runs: Arc::new(Mutex::new(HashMap::new())) })
-        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_obsidian])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<AppState>();
@@ -405,5 +506,24 @@ mod tests {
         let probe = read_skill_metadata(&root.join("knowledge-probe"), "Встроенный").unwrap();
         assert_eq!(probe.name, "knowledge-probe");
         assert!(!probe.description.is_empty());
+    }
+    #[test]
+    fn backup_roundtrip_preserves_learning_data() {
+        let path = std::env::temp_dir().join(format!("educatio-test-{}.sqlite3",uuid::Uuid::new_v4()));
+        let source = Connection::open_in_memory().unwrap();
+        migrate(&source).unwrap();
+        source.execute("INSERT INTO learning_goals VALUES ('goal','Изучить C','now','now')",[]).unwrap();
+        let mut archive = Connection::open(&path).unwrap();
+        Backup::new(&source,&mut archive).unwrap().run_to_completion(100,Duration::from_millis(1),None).unwrap();
+        drop(archive);
+        let info = inspect_backup_file(&path).unwrap();
+        assert_eq!(info.goals,1);
+        let from_archive = Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut restored = Connection::open_in_memory().unwrap();
+        Backup::new(&from_archive,&mut restored).unwrap().run_to_completion(100,Duration::from_millis(1),None).unwrap();
+        let title: String = restored.query_row("SELECT title FROM learning_goals WHERE id='goal'",[],|r|r.get(0)).unwrap();
+        assert_eq!(title,"Изучить C");
+        drop(from_archive);
+        std::fs::remove_file(path).unwrap();
     }
 }

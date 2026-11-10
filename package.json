@@ -16,10 +16,16 @@
     "runtime:bundle": "npm run runtime:build && node scripts/prepare-sidecar.mjs"
   },
   "dependencies": {
+    "@codemirror/lang-cpp": "^6.0.3",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
     "@openai/codex-sdk": "^0.167.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@tanstack/react-query": "^5.90.0",
     "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@uiw/react-codemirror": "^4.25.12",
     "@xyflow/react": "^12.11.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -30,11 +36,11 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
-    "remark-math": "^6.0.0",
     "rehype-katex": "^7.0.1",
+    "remark-math": "^6.0.0",
     "tailwind-merge": "^3.3.0",
-    "zustand": "^5.0.8",
-    "zod": "^4.1.0"
+    "zod": "^4.1.0",
+    "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",

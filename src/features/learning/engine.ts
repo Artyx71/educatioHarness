@@ -128,10 +128,10 @@ async function extract(goalId:string,sessionId:string,messages:{id:string;conten
   for(const chain of extracted.chains) { const premises=chain.premises.map(p=>ids.get(p)).filter((v):v is string=>!!v); const conclusion=ids.get(chain.conclusion); if(!premises.length||!conclusion) continue; const key=`${[...premises].sort().join('+')}>${conclusion}`; if(snap.knowledge_edges.some(e=>`${JSON.parse(e.premises).sort().join('+')}>${e.conclusion_id}`===key)) continue; await api.save('knowledge_edges',{id:id(),goal_id:goalId,premises:JSON.stringify(premises),conclusion_id:conclusion,source_session_id:sessionId,created_at:now()}); }
 }
 
-export async function generateExercise(goalId:string,topic:Topic,config:Config) {
+export async function generateExercise(goalId:string,topic:Topic,config:Config,format?:'retrieval_card') {
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
   const attempts=snap.attempts.slice(-8).map(a=>({answer:a.answer,evaluation:a.evaluation}));
-  const result=await call<Practice>(config,'practice',{goal:goal.title,topic,attempts});
+  const result=await call<Practice>(config,'practice',{goal:goal.title,topic,attempts,format});
   const exercise={id:id(),goal_id:goalId,topic_id:topic.id,kind:result.kind,prompt:result.prompt,solution:result.solution,created_at:now()};
   await api.save('exercises',exercise); return exercise;
 }
