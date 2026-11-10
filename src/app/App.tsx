@@ -7,7 +7,7 @@ import { api, cancelActiveAgent } from '../lib/api';
 import brandIcon from '../../src-tauri/icons/icon.svg';
 import type { AuthStatus, Exercise, Provider, Snapshot, Topic } from '../lib/types';
 import { useUi } from '../stores/ui';
-import { activeGoal, evaluateExercise, finishProbe, generateExercise, resumeProbe, startGoal, teach, type Config } from '../features/learning/engine';
+import { activeGoal, evaluateExercise, finishProbe, generateExercise, resumeProbe, startGoal, startLearningSession, teach, type Config } from '../features/learning/engine';
 import { SkillSettings, parseSkillOverrides } from '../features/settings/SkillSettings';
 import { Markdown } from '../components/Markdown';
 import { AnswerInput } from '../features/practice/AnswerInput';
@@ -44,7 +44,7 @@ export default function App() {
   if(dbError) return <div className="fatal">Ошибка базы данных: {String(dbError)}</div>;
   return <div className="app"><aside className="sidebar ref-sidebar">
     <button className="brand ref-brand" onClick={()=>ui.setPage('dashboard')} aria-label="На главную"><div className="brand-mark"><img src={brandIcon} alt=""/></div><div>educatioHarness</div></button>
-    <div className="sidebar-actions"><button onClick={()=>{ui.setGoal('');ui.setSession('');ui.setPage('learn')}}><Plus size={15}/> ОБУЧЕНИЕ</button><button onClick={()=>ui.setPage('practice')}><Dumbbell size={15}/> ПРАКТИКА</button></div>
+    <div className="sidebar-actions"><button onClick={()=>{ui.setGoal('');ui.setSession('');ui.setPage('learn')}}><Plus size={15}/> ОБУЧЕНИЕ</button>{goal&&topics.length>0&&<button disabled={!!busy} onClick={()=>run('Новое занятие',async()=>{const next=await startLearningSession(goal.id);ui.setSession(next);ui.setPage('learn')})}><BookOpen size={15}/> НОВОЕ ЗАНЯТИЕ</button>}<button onClick={()=>ui.setPage('practice')}><Dumbbell size={15}/> ПРАКТИКА</button></div>
     <div className="sessions-heading"><span>ЗАНЯТИЯ</span></div><label className="session-search"><Search size={13}/><input aria-label="Поиск занятий" placeholder="Поиск..." value={sessionSearch} onChange={e=>setSessionSearch(e.target.value)}/></label>
     <div className="session-list">{snap.sessions.slice().reverse().filter(s=>s.title.toLocaleLowerCase('ru').includes(sessionSearch.toLocaleLowerCase('ru'))).map(s=><button key={s.id} className={session?.id===s.id&&ui.page==='learn'?'selected':''} onClick={()=>{ui.setSession(s.id);ui.setGoal(s.goal_id);ui.setPage('learn')}}><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)}</small></button>)}{!snap.sessions.length&&<p>Пока нет занятий</p>}</div>
     <div className="sidebar-bottom ref-bottom"><button onClick={()=>ui.setPage('graph')}><Network size={15}/> ГРАФ ЗНАНИЙ</button><button onClick={()=>ui.setPage('settings')}><Settings2 size={15}/> НАСТРОЙКИ</button><div className={`status ${connected?'online':'offline'}`}><span/>{connected?`${provider==='codex'?'ChatGPT':'OpenAI API'} подключён`:'ИИ не подключён'}</div>{authError&&<p className="warn">{String(authError)}</p>}</div>

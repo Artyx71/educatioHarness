@@ -106,18 +106,33 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
   await message(sessionId,'assistant',curriculum.approach,'curriculum');
 }
 
+export async function startLearningSession(goalId:string) {
+  const snap=await api.snapshot();
+  const goal=snap.learning_goals.find(item=>item.id===goalId);
+  const curriculumStep=snap.workflow_executions.find(item=>item.id===`${goalId}:curriculum`);
+  if(!goal || !snap.curricula.some(item=>item.goal_id===goalId) || curriculumStep&&curriculumStep.status!=='completed') throw new Error('Сначала завершите диагностику и создайте план');
+  const sessionId=id(), timestamp=now();
+  await api.save('sessions',{id:sessionId,goal_id:goalId,phase:'learning',title:goal.title,created_at:timestamp,updated_at:timestamp});
+  await api.save('learning_goals',{...goal,updated_at:timestamp});
+  return sessionId;
+}
+
 export async function teach(goalId:string,sessionId:string,topic:Topic,config:Config,answer?:string) {
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
   if(answer) await message(sessionId,'user',answer,'teaching-answer');
-  const history=snap.messages.filter(m=>m.session_id===sessionId).slice(-20).map(m=>({role:m.role,content:m.content,kind:m.kind}));
+  const sessionIds=new Set(snap.sessions.filter(item=>item.goal_id===goalId).map(item=>item.id));
+  const history=snap.messages.filter(item=>sessionIds.has(item.session_id)).sort((a,b)=>a.created_at.localeCompare(b.created_at)).slice(-24).map(item=>({role:item.role,content:item.content,kind:item.kind}));
+  const recordedClaims=snap.knowledge_nodes.filter(item=>item.goal_id===goalId&&item.kind==='proposition').slice(-20).map(item=>item.statement);
   await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''});
   let result:AgentResult<Teaching>;
-  try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:JSON.parse(topic.objectives)},history,answer:answer??null},sessionId); }
+  try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:JSON.parse(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId); }
   catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e)); throw e; }
   const text=`${result.message}\n\n**${result.questionType==='predict'?'Предположите':'Проверьте понимание'}:** ${result.question}`;
   const created=await message(sessionId,'assistant',text,'teaching');
   await workflow(goalId,'teach','waiting_for_user',{topicId:topic.id,answer:answer??''},result);
   await api.save('topics',{...topic,status:'in_progress',position:String(topic.position)});
+  const session=snap.sessions.find(item=>item.id===sessionId);
+  if(session) await api.save('sessions',{...session,updated_at:now()});
   await extract(goalId,sessionId,[created],config).catch(()=>{});
 }
 
@@ -140,7 +155,8 @@ async function extract(goalId:string,sessionId:string,messages:{id:string;conten
 
 export async function generateExercise(goalId:string,topic:Topic,config:Config,format?:'retrieval_card') {
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
-  const attempts=snap.attempts.slice(-8).map(a=>({answer:a.answer,evaluation:a.evaluation}));
+  const topicExerciseIds=new Set(snap.exercises.filter(item=>item.goal_id===goalId&&item.topic_id===topic.id).map(item=>item.id));
+  const attempts=snap.attempts.filter(item=>topicExerciseIds.has(item.exercise_id)).slice(-8).map(item=>({answer:item.answer,evaluation:item.evaluation}));
   const result=await call<Practice>(config,'practice',{goal:goal.title,topic,attempts,format});
   const exercise={id:id(),goal_id:goalId,topic_id:topic.id,kind:result.kind,prompt:result.prompt,solution:result.solution,created_at:now()};
   await api.save('exercises',exercise); return exercise;

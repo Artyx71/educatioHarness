@@ -10,7 +10,7 @@ const fake = vi.hoisted(() => ({
 
 vi.mock('../src/lib/api', () => ({ api: fake, id: () => crypto.randomUUID(), now: () => new Date().toISOString() }));
 
-import { finishProbe } from '../src/features/learning/engine';
+import { finishProbe, generateExercise, startLearningSession, teach } from '../src/features/learning/engine';
 
 describe('learning workflow recovery', () => {
   beforeEach(() => {
@@ -22,6 +22,8 @@ describe('learning workflow recovery', () => {
       diagnostic_answers: [{ id: 'saved-answer', session_id: 'session', question: 'Вопрос 1', answer: 'Ответ 1', reasoning: 'Мысль 1', evaluation: '', created_at: '2026-01-01' }],
       curricula: [{ id: 'partial-plan', goal_id: 'goal' }],
       topics: [{ id: 'partial-topic', curriculum_id: 'partial-plan' }],
+      exercises: [],
+      attempts: [],
       knowledge_nodes: [],
       knowledge_edges: [],
       knowledge_provenance: [],
@@ -55,5 +57,45 @@ describe('learning workflow recovery', () => {
     expect(actions.indexOf('remove:curricula:partial-plan')).toBeLessThan(actions.indexOf('save:curricula'));
     const completedProbe = fake.save.mock.calls.find(([table, record]) => table === 'workflow_executions' && record.step_id === 'probe' && record.status === 'completed');
     expect(JSON.parse(completedProbe?.[1].output).questions).toHaveLength(2);
+  });
+
+  it('starts another learning session only after the curriculum is complete', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:curriculum',status:'running'});
+    await expect(startLearningSession('goal')).rejects.toThrow('Сначала завершите диагностику');
+    snapshot.workflow_executions.at(-1).status='completed';
+    const next=await startLearningSession('goal');
+    expect(next).toBeTruthy();
+    expect(fake.save).toHaveBeenCalledWith('sessions',expect.objectContaining({id:next,goal_id:'goal',phase:'learning'}));
+  });
+
+  it('keeps teacher context inside one goal across sessions', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.sessions.push({id:'previous',goal_id:'goal'},{id:'other',goal_id:'another-goal'});
+    snapshot.messages.push(
+      {id:'a',session_id:'previous',role:'user',content:'Я понимаю адреса',kind:'teaching-answer',created_at:'2026-01-02'},
+      {id:'b',session_id:'other',role:'user',content:'Чужая цель',kind:'teaching-answer',created_at:'2026-01-03'},
+    );
+    snapshot.knowledge_nodes.push({id:'claim',goal_id:'goal',kind:'proposition',statement:'Указатель хранит адрес'});
+    fake.agent.mockImplementation(async (operation: string) => {
+      if(operation==='teach') return {message:'Проверим на примере адреса.',question:'Что изменится?',questionType:'predict',topicId:'topic',phase:'teach',_execution:{durationMs:1}};
+      if(operation==='extract') return {propositions:[],chains:[],_execution:{durationMs:1}};
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    await teach('goal','session',{id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'Адреса памяти',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0},{provider:'codex',model:'default'});
+    const input=fake.agent.mock.calls.find(([operation])=>operation==='teach')?.[3];
+    expect(input.history.map((item:{content:string})=>item.content)).toContain('Я понимаю адреса');
+    expect(input.history.map((item:{content:string})=>item.content)).not.toContain('Чужая цель');
+    expect(input.recordedClaims).toEqual(['Указатель хранит адрес']);
+  });
+
+  it('uses only attempts for the selected topic when generating practice', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.exercises.push({id:'same-topic',goal_id:'goal',topic_id:'topic'},{id:'other-topic',goal_id:'goal',topic_id:'other'});
+    snapshot.attempts.push({exercise_id:'same-topic',answer:'Нужный ответ',evaluation:'{}'},{exercise_id:'other-topic',answer:'Другой ответ',evaluation:'{}'});
+    fake.agent.mockResolvedValue({kind:'reasoning',prompt:'Объясните значение указателя',solution:'Указатель содержит адрес',topicId:'topic',_execution:{durationMs:1}});
+    await generateExercise('goal',{id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'Адреса памяти',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0},{provider:'codex',model:'default'});
+    const input=fake.agent.mock.calls.find(([operation])=>operation==='practice')?.[3];
+    expect(input.attempts.map((item:{answer:string})=>item.answer)).toEqual(['Нужный ответ']);
   });
 });
