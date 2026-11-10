@@ -89,6 +89,20 @@ describe('learning workflow recovery', () => {
     expect(input.recordedClaims).toEqual(['Указатель хранит адрес']);
   });
 
+  it('links an audited shared proposition to the current topic', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.knowledge_nodes.push({id:'existing',goal_id:'goal',kind:'proposition',name:'Адрес',statement:'Указатель хранит адрес'});
+    fake.agent.mockImplementation(async (operation:string) => {
+      if(operation==='teach') return {message:'Указатель хранит адрес.',question:'Что это означает?',questionType:'check',topicId:'topic',phase:'teach',_execution:{durationMs:1}};
+      if(operation==='extract') return {propositions:[{id:'claim',name:'Адрес',statement:'Указатель хранит адрес.',sourceMessageId:null}],chains:[],_execution:{durationMs:1}};
+      if(operation==='audit') return {links:[{id:'claim',linkTo:'existing'}],_execution:{durationMs:1}};
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    await teach('goal','session',{id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'Адреса памяти',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0},{provider:'codex',model:'default'});
+    expect(fake.save).toHaveBeenCalledWith('knowledge_topic_links',{node_id:'existing',topic_id:'topic'});
+    expect(fake.save.mock.calls.filter(([table])=>table==='knowledge_nodes')).toHaveLength(0);
+  });
+
   it('uses only attempts for the selected topic when generating practice', async () => {
     const snapshot=await fake.snapshot();
     snapshot.exercises.push({id:'same-topic',goal_id:'goal',topic_id:'topic'},{id:'other-topic',goal_id:'goal',topic_id:'other'});
