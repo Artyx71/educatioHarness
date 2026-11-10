@@ -11,6 +11,22 @@ type PracticeEvaluation = { verdict:string;feedback:string;misconception:string;
 type Extraction = { propositions:{id:string;name:string;statement:string;sourceMessageId?:string|null}[];chains:{premises:string[];conclusion:string}[] };
 type Audit = { links:{id:string;linkTo:string|null}[] };
 
+export function orderCurriculumTopics<T extends {id:string;prerequisites:string[]}>(topics:T[]):T[] {
+  const ids=new Set(topics.map(topic=>topic.id));
+  if(ids.size!==topics.length) throw new Error('Учебный план содержит повторяющиеся ID тем');
+  for(const topic of topics) for(const prerequisite of topic.prerequisites) {
+    if(!ids.has(prerequisite)) throw new Error(`Тема «${topic.id}» ссылается на отсутствующую предпосылку`);
+    if(prerequisite===topic.id) throw new Error(`Тема «${topic.id}» не может зависеть от себя`);
+  }
+  const remaining=new Set(ids),ordered:T[]=[];
+  while(remaining.size) {
+    const next=topics.find(topic=>remaining.has(topic.id)&&topic.prerequisites.every(id=>!remaining.has(id)));
+    if(!next) throw new Error('Учебный план содержит цикл предпосылок');
+    ordered.push(next);remaining.delete(next.id);
+  }
+  return ordered;
+}
+
 const skill:Record<Operation,string> = {probe:'knowledge-probe',evaluate_probe:'knowledge-probe',curriculum:'curriculum-planner',teach:'socratic-teacher',practice:'exercise-generator',evaluate_practice:'answer-evaluator',extract:'knowledge-extractor',audit:'knowledge-auditor',validate:''};
 
 async function call<T>(config:Config,operation:Operation,input:unknown,sessionId?:string):Promise<AgentResult<T>> {
@@ -86,7 +102,10 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
   await message(sessionId,'assistant',evaluation.summary,'probe-evaluation');
   await workflow(goalId,'curriculum','running',{evaluation});
   let curriculum:AgentResult<Curriculum>;
-  try { curriculum=await call<Curriculum>(config,'curriculum',{goal:goal.title,answers,evaluation},sessionId); }
+  try {
+    curriculum=await call<Curriculum>(config,'curriculum',{goal:goal.title,answers,evaluation},sessionId);
+    curriculum={...curriculum,topics:orderCurriculumTopics(curriculum.topics)};
+  }
   catch(e) { await workflow(goalId,'curriculum',String(e).includes('отменён')?'cancelled':'failed',{evaluation},null,String(e)); throw e; }
   // A previous attempt may have stopped while saving topics. Replace that partial plan before writing the new one.
   for(const previous of snap.curricula.filter(item=>item.goal_id===goalId)) await api.remove('curricula',previous.id);

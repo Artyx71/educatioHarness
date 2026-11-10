@@ -59,6 +59,17 @@ describe('learning workflow recovery', () => {
     expect(JSON.parse(completedProbe?.[1].output).questions).toHaveLength(2);
   });
 
+  it('does not replace the saved plan when the model returns invalid dependencies', async () => {
+    fake.agent.mockImplementation(async (operation:string) => {
+      if(operation==='evaluate_probe') return {summary:'Оценка',observations:[],startingPoint:'Начало',_execution:{durationMs:1}};
+      if(operation==='curriculum') return {approach:'План',topics:[{id:'pointers',title:'Указатели',description:'',prerequisites:['missing'],objectives:[],difficulty:'beginner'}],_execution:{durationMs:1}};
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    await expect(finishProbe('goal','session',[{question:'Вопрос 1',answer:'Ответ 1',reasoning:'Мысль 1'}],{provider:'codex',model:'default'})).rejects.toThrow('отсутствующую предпосылку');
+    expect(fake.remove).not.toHaveBeenCalled();
+    expect(fake.save).toHaveBeenCalledWith('workflow_executions',expect.objectContaining({step_id:'curriculum',status:'failed'}));
+  });
+
   it('starts another learning session only after the curriculum is complete', async () => {
     const snapshot=await fake.snapshot();
     snapshot.workflow_executions.push({id:'goal:curriculum',status:'running'});
