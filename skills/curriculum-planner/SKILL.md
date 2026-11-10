@@ -1,6 +1,6 @@
 ---
 name: curriculum-planner
-description: Plan the smallest dependency path from observed understanding to a concrete learning goal.
+description: Строит кратчайший путь по предпосылкам от текущих знаний к учебной цели.
 license: AGPL-3.0-only
 ---
 # Curriculum planner

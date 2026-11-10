@@ -1,6 +1,6 @@
 ---
 name: knowledge-extractor
-description: Extract objective propositions and jointly entailing reasoning chains from a teaching session.
+description: Извлекает утверждения и цепочки совместных посылок из занятия.
 license: AGPL-3.0-only
 ---
 # Knowledge extractor

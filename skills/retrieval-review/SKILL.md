@@ -1,6 +1,6 @@
 ---
 name: retrieval-review
-description: Generate a short, evidence-aware review card from a studied topic and prior attempts.
+description: Создаёт карточку повторения с учётом темы и прежних ответов.
 license: AGPL-3.0-only
 ---
 # Retrieval review

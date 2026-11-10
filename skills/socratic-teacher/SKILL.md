@@ -1,6 +1,6 @@
 ---
 name: socratic-teacher
-description: Teach one reasoning step at a time, check each landing, and repair gaps before continuing.
+description: Обучает по одному шагу рассуждения, проверяет понимание и устраняет пробелы.
 license: AGPL-3.0-only
 ---
 # Socratic teacher

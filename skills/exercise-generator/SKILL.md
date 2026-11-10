@@ -1,6 +1,6 @@
 ---
 name: exercise-generator
-description: Create a varied retrieval and application exercise for an already studied topic.
+description: Создаёт задания на вспоминание и применение уже изученной темы.
 license: AGPL-3.0-only
 ---
 # Exercise generator

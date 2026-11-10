@@ -1,6 +1,6 @@
 ---
 name: knowledge-probe
-description: Diagnose the learner's current understanding and the edge of each prerequisite strand.
+description: Выясняет текущие знания и границу понимания по каждой ветке предпосылок.
 license: AGPL-3.0-only
 ---
 # Knowledge probe

@@ -1,6 +1,6 @@
 ---
 name: answer-evaluator
-description: Evaluate a practice answer and reasoning with calibrated, actionable feedback.
+description: Оценивает ответ и ход рассуждения, даёт точную и полезную обратную связь.
 license: AGPL-3.0-only
 ---
 # Answer evaluator

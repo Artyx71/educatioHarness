@@ -1,6 +1,6 @@
 ---
 name: knowledge-auditor
-description: Resolve new propositions against existing graph identities before deterministic merge.
+description: Сверяет новые утверждения с графом знаний перед объединением дублей.
 license: AGPL-3.0-only
 ---
 # Knowledge auditor

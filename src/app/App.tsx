@@ -143,7 +143,7 @@ function Settings({auth,provider,model,busy,run,saveConfig,refreshAuth,savedDire
       <div className="panel">
         <h2>Авторизация</h2><h3>ChatGPT</h3>
         <p>Codex CLI: {auth?.codex_installed?'установлен':'не установлен'}. {auth?.codex_authenticated?'Вход выполнен.':'Войдите в браузере через официальный процесс Codex.'}</p>
-        {auth?.detail&&<p className="muted">{auth.detail}</p>}
+        {auth?.detail&&!auth.codex_authenticated&&<p className="muted">{auth.detail}</p>}
         <div className="button-row"><button className="button secondary" disabled={!!busy||!auth?.codex_installed} onClick={()=>run('Открытие входа',async()=>{await api.login();await refreshAuth()})}>Войти через ChatGPT</button><button className="button ghost" disabled={!auth?.codex_authenticated} onClick={()=>run('Отключение',async()=>{await api.logout();await refreshAuth()})}><LogOut size={15}/> Отключить</button></div>
         <h3>Ключ OpenAI API</h3><label>Ключ<input type="password" autoComplete="off" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-…"/></label>
         <div className="button-row"><button className="button secondary" disabled={!key||!!busy} onClick={()=>run('Сохранение ключа',async()=>{await api.saveKey(key);setKey('');await refreshAuth()})}>Сохранить или изменить ключ</button><button className="button ghost" disabled={!auth?.api_key_saved} onClick={()=>run('Удаление ключа',async()=>{await api.removeKey();await refreshAuth()})}>Удалить ключ</button></div>
