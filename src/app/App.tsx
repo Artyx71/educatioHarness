@@ -39,7 +39,16 @@ export default function App() {
   const config:Config={provider,model:model|| (provider==='codex'?'default':defaultApiModel),skillOverrides:parseSkillOverrides(savedOverrides)};
   const connected=provider==='codex'?auth?.codex_authenticated:auth?.api_key_saved;
   const refresh=async()=>{await qc.invalidateQueries({queryKey:['snapshot']});await refreshAuth()};
-  async function run(label:string,fn:()=>Promise<unknown>){setError('');setProgressChars(0);setBusy(label);try{await fn();await refresh()}catch(e){setError(String(e))}finally{setBusy('');setProgressChars(0)}}
+  async function run(label:string,fn:()=>Promise<unknown>){
+    setError('');setProgressChars(0);setBusy(label);
+    try { await fn(); }
+    catch(e) { setError(String(e)); }
+    finally {
+      // A failed agent call may already have persisted a goal or workflow step.
+      try { await refresh(); } catch(e) { setError(current=>current||String(e)); }
+      setBusy('');setProgressChars(0);
+    }
+  }
   async function saveConfig(p:Provider,m:string){setProvider(p);setModel(m);await api.save('preferences',{key:'provider',value:p});await api.save('preferences',{key:'model',value:m});await refresh()}
   const mustConnect=!connected;
   if(dbError) return <div className="fatal">Ошибка базы данных: {String(dbError)}</div>;
@@ -59,7 +68,7 @@ export default function App() {
     <Settings auth={auth} provider={provider} model={model} busy={busy} run={run} saveConfig={saveConfig} refreshAuth={refreshAuth} savedDirectories={savedDirectories} savedOverrides={savedOverrides}/>}
     {busy&&progressChars>0&&<div className="agent-progress">Ответ формируется · {progressChars} знаков</div>}
     {busy&&<button className="cancel-agent" onClick={()=>void cancelActiveAgent()}>Отменить запрос</button>}
-    {error&&ui.page!=='settings'&&<div className="toast error" role="alert">{error}<button onClick={()=>setError('')}>×</button></div>}
+    {error&&(connected||ui.page==='settings')&&<div className="toast error" role="alert">{error}<button onClick={()=>setError('')} aria-label="Закрыть ошибку">×</button></div>}
   </main></div>;
 }
 
