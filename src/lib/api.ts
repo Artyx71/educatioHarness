@@ -1,5 +1,26 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentResult, AuthStatus, Operation, Provider, SkillMetadata, Snapshot } from './types';
+import type { AgentResult, Attempt, AuthStatus, Exercise, Goal, KnowledgeEdge, KnowledgeNode, Message, Operation, Provider, Session, SkillMetadata, Snapshot, Topic } from './types';
+
+type WritableNumbers<T> = { [K in keyof T]: T[K] extends number ? T[K] | string : T[K] };
+type AgentExecution = { id:string; session_id:string; provider:Provider; model:string; operation:Operation; status:string; duration_ms:number|string; metadata:string; created_at:string };
+type SaveRecords = {
+  learning_goals:Goal;
+  sessions:Session;
+  messages:Message;
+  diagnostic_answers:Snapshot['diagnostic_answers'][number];
+  curricula:Snapshot['curricula'][number];
+  topics:WritableNumbers<Topic>;
+  exercises:Exercise;
+  attempts:Attempt;
+  knowledge_nodes:KnowledgeNode;
+  knowledge_edges:KnowledgeEdge;
+  knowledge_topic_links:Snapshot['knowledge_topic_links'][number];
+  knowledge_provenance:Snapshot['knowledge_provenance'][number];
+  workflow_executions:WritableNumbers<Snapshot['workflow_executions'][number]>;
+  agent_executions:AgentExecution;
+  preferences:Snapshot['preferences'][number];
+};
+type DeletableTable = 'curricula'|'topics'|'knowledge_nodes'|'knowledge_edges'|'exercises'|'learning_goals';
 
 export const id = () => crypto.randomUUID();
 export const now = () => new Date().toISOString();
@@ -10,8 +31,8 @@ export async function cancelActiveAgent() {
 }
 export const api = {
   snapshot: () => invoke<Snapshot>('snapshot'),
-  save: (table:string,record:Record<string,unknown>) => invoke<void>('save_record',{table,record}),
-  remove: (table:string,id:string) => invoke<void>('delete_record',{table,id}),
+  save: <K extends keyof SaveRecords>(table:K,record:SaveRecords[K]) => invoke<void>('save_record',{table,record}),
+  remove: (table:DeletableTable,id:string) => invoke<void>('delete_record',{table,id}),
   auth: () => invoke<AuthStatus>('auth_status'),
   login: () => invoke<void>('codex_login'),
   logout: () => invoke<void>('codex_logout'),

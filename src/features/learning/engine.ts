@@ -94,9 +94,11 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
   const ids=new Map(curriculum.topics.map(t=>[t.id,id()]));
   const conceptIds=new Map(curriculum.topics.map(t=>[t.id,snap.knowledge_nodes.find(n=>n.goal_id===goalId&&n.kind==='concept'&&n.name.toLocaleLowerCase('ru')===t.title.toLocaleLowerCase('ru'))?.id??id()]));
   for(const [position,t] of curriculum.topics.entries()) {
-    await api.save('topics',{id:ids.get(t.id),curriculum_id:curriculumId,title:t.title,description:t.description,prerequisites:JSON.stringify(t.prerequisites.map(p=>ids.get(p)).filter(Boolean)),objectives:JSON.stringify(t.objectives),difficulty:t.difficulty,status:'pending',position:String(position)});
-    if(!snap.knowledge_nodes.some(n=>n.id===conceptIds.get(t.id))) await api.save('knowledge_nodes',{id:conceptIds.get(t.id),goal_id:goalId,kind:'concept',name:t.title,statement:t.description,source_session_id:sessionId,source_message_id:'',created_at:now()});
-    await api.save('knowledge_topic_links',{node_id:conceptIds.get(t.id),topic_id:t.id});
+    const topicId=ids.get(t.id),conceptId=conceptIds.get(t.id);
+    if(!topicId||!conceptId) throw new Error('Не удалось сопоставить темы учебного плана');
+    await api.save('topics',{id:topicId,curriculum_id:curriculumId,title:t.title,description:t.description,prerequisites:JSON.stringify(t.prerequisites.map(p=>ids.get(p)).filter(Boolean)),objectives:JSON.stringify(t.objectives),difficulty:t.difficulty,status:'pending',position:String(position)});
+    if(!snap.knowledge_nodes.some(n=>n.id===conceptId)) await api.save('knowledge_nodes',{id:conceptId,goal_id:goalId,kind:'concept',name:t.title,statement:t.description,source_session_id:sessionId,source_message_id:'',created_at:now()});
+    await api.save('knowledge_topic_links',{node_id:conceptId,topic_id:topicId});
   }
   for(const t of curriculum.topics) for(const prerequisite of t.prerequisites) {
     const premise=conceptIds.get(prerequisite),conclusion=conceptIds.get(t.id);
