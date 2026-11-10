@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { BookOpen, BrainCircuit, Dumbbell, Settings2, ArrowRight, PlugZap, LoaderCircle, Plus, LogOut, Search, Network } from 'lucide-react';
 import { api, cancelActiveAgent } from '../lib/api';
@@ -7,6 +8,7 @@ import type { AuthStatus, Exercise, Provider, Snapshot, Topic } from '../lib/typ
 import { useUi } from '../stores/ui';
 import { activeGoal, evaluateExercise, finishProbe, generateExercise, resumeProbe, startGoal, teach, type Config } from '../features/learning/engine';
 import { Graph } from '../features/knowledge-graph/Graph';
+import { SkillSettings, parseSkillOverrides } from '../features/settings/SkillSettings';
 import { Markdown } from '../components/Markdown';
 import { phaseLabel, exerciseLabel, verdictLabel } from '../lib/i18n';
 
@@ -17,6 +19,8 @@ export default function App() {
   const {data:snap=empty,error:dbError}=useQuery({queryKey:['snapshot'],queryFn:api.snapshot});
   const {data:auth,error:authError,refetch:refreshAuth}=useQuery({queryKey:['auth'],queryFn:api.auth,refetchInterval:6000});
   const [busy,setBusy]=useState(''); const [error,setError]=useState(''); const [sessionSearch,setSessionSearch]=useState('');
+  const [progressChars,setProgressChars]=useState(0);
+  useEffect(()=>{let closed=false;let unlisten:(()=>void)|undefined;void listen<{requestId:string;chars:number}>('agent-progress',event=>setProgressChars(event.payload.chars)).then(fn=>{if(closed)fn();else unlisten=fn});return()=>{closed=true;unlisten?.()}},[]);
   const [provider,setProvider]=useState<Provider>('codex'); const [model,setModel]=useState('');
   const goal=activeGoal(snap,ui.goalId); const session=ui.sessionId===''?undefined:snap.sessions.find(s=>s.id===ui.sessionId)??snap.sessions.filter(s=>s.goal_id===goal?.id).at(-1);
   const curriculum=snap.curricula.find(c=>c.goal_id===goal?.id);
@@ -25,10 +29,12 @@ export default function App() {
   const configured=snap.preferences.find(p=>p.key==='provider')?.value as Provider|undefined;
   useEffect(()=>{if(configured) setProvider(configured)},[configured]);
   useEffect(()=>{const value=snap.preferences.find(p=>p.key==='model')?.value;if(value) setModel(value)},[snap.preferences]);
-  const config:Config={provider,model:model|| (provider==='codex'?'default':'gpt-5.4')};
+  const savedDirectories=snap.preferences.find(p=>p.key==='skill_directories')?.value??'[]';
+  const savedOverrides=snap.preferences.find(p=>p.key==='skill_overrides')?.value??'{}';
+  const config:Config={provider,model:model|| (provider==='codex'?'default':'gpt-5.4'),skillOverrides:parseSkillOverrides(savedOverrides)};
   const connected=provider==='codex'?auth?.codex_authenticated:auth?.api_key_saved;
   const refresh=async()=>{await qc.invalidateQueries({queryKey:['snapshot']});await refreshAuth()};
-  async function run(label:string,fn:()=>Promise<unknown>){setError('');setBusy(label);try{await fn();await refresh()}catch(e){setError(String(e))}finally{setBusy('')}}
+  async function run(label:string,fn:()=>Promise<unknown>){setError('');setProgressChars(0);setBusy(label);try{await fn();await refresh()}catch(e){setError(String(e))}finally{setBusy('');setProgressChars(0)}}
   async function saveConfig(p:Provider,m:string){setProvider(p);setModel(m);await api.save('preferences',{key:'provider',value:p});await api.save('preferences',{key:'model',value:m});await refresh()}
   const mustConnect=!connected;
   if(dbError) return <div className="fatal">Ошибка базы данных: {String(dbError)}</div>;
@@ -45,7 +51,8 @@ export default function App() {
     ui.page==='graph'?<Graph nodes={snap.knowledge_nodes.filter(n=>n.goal_id===goal?.id)} edges={snap.knowledge_edges.filter(e=>e.goal_id===goal?.id)} sessions={snap.sessions} provenance={snap.knowledge_provenance} onSave={node=>run('Сохранение утверждения',()=>api.save('knowledge_nodes',node))} onDelete={id=>run('Удаление утверждения',()=>api.remove('knowledge_nodes',id))}/>:
     ui.page==='practice'?<PracticePage goalId={goal?.id} topics={topics} snap={snap} config={config} busy={busy} run={run}/>:
     ui.page==='history'?<History snap={snap} onOpen={id=>{ui.setSession(id);ui.setGoal(snap.sessions.find(s=>s.id===id)?.goal_id??null);ui.setPage('learn')}}/>:
-    <Settings auth={auth} provider={provider} model={model} busy={busy} run={run} saveConfig={saveConfig} refreshAuth={refreshAuth}/>}
+    <Settings auth={auth} provider={provider} model={model} busy={busy} run={run} saveConfig={saveConfig} refreshAuth={refreshAuth} savedDirectories={savedDirectories} savedOverrides={savedOverrides}/>}
+    {busy&&progressChars>0&&<div className="agent-progress">Ответ формируется · {progressChars} знаков</div>}
     {busy&&<button className="cancel-agent" onClick={()=>void cancelActiveAgent()}>Отменить запрос</button>}
     {error&&ui.page!=='settings'&&<div className="toast error" role="alert">{error}<button onClick={()=>setError('')}>×</button></div>}
   </main></div>;
@@ -91,9 +98,30 @@ function PracticePage({goalId,topics,snap,config,busy,run}:{goalId?:string;topic
 
 function History({snap,onOpen}:{snap:Snapshot;onOpen:(id:string)=>void}){return <div className="page"><span className="eyebrow">ИСТОРИЯ</span><h1>Учебные занятия</h1><div className="panel list-panel">{snap.sessions.length?snap.sessions.slice().reverse().map(s=><button className="history-row" key={s.id} onClick={()=>onOpen(s.id)}><div><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)} · {snap.messages.filter(m=>m.session_id===s.id).length} сообщений</small></div><ArrowRight size={16}/></button>):<p className="muted">Занятий пока нет.</p>}</div></div>}
 
-function Settings({auth,provider,model,busy,run,saveConfig,refreshAuth}:{auth?:AuthStatus;provider:Provider;model:string;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void;saveConfig:(p:Provider,m:string)=>Promise<void>;refreshAuth:()=>Promise<unknown>}){
+function Settings({auth,provider,model,busy,run,saveConfig,refreshAuth,savedDirectories,savedOverrides}:{auth?:AuthStatus;provider:Provider;model:string;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void;saveConfig:(p:Provider,m:string)=>Promise<void>;refreshAuth:()=>Promise<unknown>;savedDirectories:string;savedOverrides:string}){
   const [key,setKey]=useState('');const [localModel,setLocalModel]=useState(model);const [message,setMessage]=useState('');
   useEffect(()=>setLocalModel(model),[model]);
   const config={provider,model:localModel||(provider==='codex'?'default':'gpt-5.4')};
-  return <div className="page settings-page"><span className="eyebrow">ПАРАМЕТРЫ</span><h1>Настройки</h1><div className="settings-grid"><div className="panel"><h2>Провайдер ИИ</h2><p>ChatGPT использует сессию Codex CLI. Запросы по API-ключу оплачиваются отдельно.</p><label>Провайдер<select value={provider} onChange={e=>run('Смена провайдера',()=>saveConfig(e.target.value as Provider,e.target.value==='codex'?'default':'gpt-5.4'))}><option value="codex">ChatGPT через Codex</option><option value="openai">Ключ OpenAI API</option></select></label><label>Модель<input value={localModel} onChange={e=>setLocalModel(e.target.value)} placeholder="default (модель из Codex CLI)"/></label><button className="button secondary" onClick={()=>run('Сохранение модели',()=>saveConfig(provider,localModel||'default'))}>Сохранить модель</button><div className="connection"><span className={`status ${provider==='codex'?auth?.codex_authenticated?'online':'offline':auth?.api_key_saved?'online':'offline'}`}><span/>{provider==='codex'?(auth?.codex_authenticated?'Вход выполнен':'Нет подключения'):auth?.api_key_saved?'API-ключ сохранён':'API-ключ не сохранён'}</span><button className="button secondary" disabled={!!busy} onClick={()=>run('Проверка подключения',async()=>{const r=await api.agent<{connected:boolean;message:string}>('validate',config.provider,config.model,{question:'Проверь подключение'},'');setMessage(r.message)})}>Проверить подключение</button>{message&&<p className="muted">{message}</p>}</div></div><div className="panel"><h2>Авторизация</h2><h3>ChatGPT</h3><p>Codex CLI: {auth?.codex_installed?'установлен':'не установлен'}. {auth?.codex_authenticated?'Вход выполнен.':'Войдите в браузере через официальный процесс Codex.'}</p>{auth?.detail&&<p className="muted">{auth.detail}</p>}<div className="button-row"><button className="button secondary" disabled={!!busy||!auth?.codex_installed} onClick={()=>run('Открытие входа',async()=>{await api.login();await refreshAuth()})}>Войти через ChatGPT</button><button className="button ghost" disabled={!auth?.codex_authenticated} onClick={()=>run('Отключение',async()=>{await api.logout();await refreshAuth()})}><LogOut size={15}/> Отключить</button></div><h3>Ключ OpenAI API</h3><label>Ключ<input type="password" autoComplete="off" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-…"/></label><div className="button-row"><button className="button secondary" disabled={!key||!!busy} onClick={()=>run('Сохранение ключа',async()=>{await api.saveKey(key);setKey('');await refreshAuth()})}>Сохранить или изменить ключ</button><button className="button ghost" disabled={!auth?.api_key_saved} onClick={()=>run('Удаление ключа',async()=>{await api.removeKey();await refreshAuth()})}>Удалить ключ</button></div></div><div className="panel"><h2>Границы агента</h2><p>Codex работает в режиме чтения; доступ к сети и инструментам отключён. Навыки задают методику, но не расширяют разрешения.</p><p className="muted">Дополнительные каталоги навыков и перенос данных пока не настраиваются.</p></div></div></div>;
+  return <div className="page settings-page">
+    <span className="eyebrow">ПАРАМЕТРЫ</span><h1>Настройки</h1>
+    <div className="settings-grid">
+      <div className="panel">
+        <h2>Провайдер ИИ</h2><p>ChatGPT использует сессию Codex CLI. Запросы по API-ключу оплачиваются отдельно.</p>
+        <label>Провайдер<select value={provider} onChange={e=>run('Смена провайдера',()=>saveConfig(e.target.value as Provider,e.target.value==='codex'?'default':'gpt-5.4'))}><option value="codex">ChatGPT через Codex</option><option value="openai">Ключ OpenAI API</option></select></label>
+        <label>Модель<input value={localModel} onChange={e=>setLocalModel(e.target.value)} placeholder="default (модель из Codex CLI)"/></label>
+        <button className="button secondary" onClick={()=>run('Сохранение модели',()=>saveConfig(provider,localModel||'default'))}>Сохранить модель</button>
+        <div className="connection"><span className={`status ${provider==='codex'?auth?.codex_authenticated?'online':'offline':auth?.api_key_saved?'online':'offline'}`}><span/>{provider==='codex'?(auth?.codex_authenticated?'Вход выполнен':'Нет подключения'):auth?.api_key_saved?'API-ключ сохранён':'API-ключ не сохранён'}</span><button className="button secondary" disabled={!!busy} onClick={()=>run('Проверка подключения',async()=>{const r=await api.agent<{connected:boolean;message:string}>('validate',config.provider,config.model,{question:'Проверь подключение'},'');setMessage(r.message)})}>Проверить подключение</button>{message&&<p className="muted">{message}</p>}</div>
+      </div>
+      <div className="panel">
+        <h2>Авторизация</h2><h3>ChatGPT</h3>
+        <p>Codex CLI: {auth?.codex_installed?'установлен':'не установлен'}. {auth?.codex_authenticated?'Вход выполнен.':'Войдите в браузере через официальный процесс Codex.'}</p>
+        {auth?.detail&&<p className="muted">{auth.detail}</p>}
+        <div className="button-row"><button className="button secondary" disabled={!!busy||!auth?.codex_installed} onClick={()=>run('Открытие входа',async()=>{await api.login();await refreshAuth()})}>Войти через ChatGPT</button><button className="button ghost" disabled={!auth?.codex_authenticated} onClick={()=>run('Отключение',async()=>{await api.logout();await refreshAuth()})}><LogOut size={15}/> Отключить</button></div>
+        <h3>Ключ OpenAI API</h3><label>Ключ<input type="password" autoComplete="off" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-…"/></label>
+        <div className="button-row"><button className="button secondary" disabled={!key||!!busy} onClick={()=>run('Сохранение ключа',async()=>{await api.saveKey(key);setKey('');await refreshAuth()})}>Сохранить или изменить ключ</button><button className="button ghost" disabled={!auth?.api_key_saved} onClick={()=>run('Удаление ключа',async()=>{await api.removeKey();await refreshAuth()})}>Удалить ключ</button></div>
+      </div>
+      <SkillSettings savedDirectories={savedDirectories} savedOverrides={savedOverrides} busy={busy} run={run}/>
+      <div className="panel"><h2>Границы агента</h2><p>Codex работает в режиме чтения; доступ к сети и инструментам отключён. Навыки задают методику, но не расширяют разрешения.</p><p className="muted">Перенос каталога данных пока не поддерживается.</p></div>
+    </div>
+  </div>;
 }

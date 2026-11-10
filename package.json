@@ -12,6 +12,7 @@
     "runtime:build": "tsc -p agent-runtime/tsconfig.json",
     "runtime:dev": "npm run runtime:build",
     "desktop:build": "npm run runtime:bundle && npm run build && tauri build",
+    "desktop:build:rpm": "npm run runtime:bundle && npm run build && tauri build --bundles rpm",
     "runtime:bundle": "npm run runtime:build && node scripts/prepare-sidecar.mjs"
   },
   "dependencies": {

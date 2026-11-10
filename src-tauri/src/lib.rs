@@ -1,10 +1,75 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, io::{Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
-use tauri::{Manager, State};
+use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use tauri::{Emitter, Manager, State};
 
 struct AppState { db: Mutex<Connection>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> }
+
+#[derive(Serialize)]
+struct SkillMetadata { name: String, description: String, source: String }
+
+#[derive(Deserialize)]
+struct SkillFrontmatter { name: String, description: String }
+
+fn skill_directories(db: &Connection) -> Result<Vec<PathBuf>, String> {
+    let saved: Option<String> = db.query_row("SELECT value FROM preferences WHERE key='skill_directories'", [], |row|row.get(0)).optional().map_err(|e|e.to_string())?;
+    let names: Vec<String> = serde_json::from_str(saved.as_deref().unwrap_or("[]")).map_err(|e|e.to_string())?;
+    if names.len() > 5 { return Err("Too many skill directories".into()); }
+    names.into_iter().map(|name| {
+        let path = PathBuf::from(&name);
+        if !path.is_absolute() || name.len() > 1024 { return Err("Skill directory must be an absolute path".into()); }
+        let canonical = path.canonicalize().map_err(|e|format!("Cannot open skill directory {name}: {e}"))?;
+        if !canonical.is_dir() || canonical.parent().is_none() { return Err(format!("Invalid skill directory {name}")); }
+        Ok(canonical)
+    }).collect()
+}
+
+fn read_skill_metadata(path: &std::path::Path, source: &str) -> Result<SkillMetadata, String> {
+    let mut header = String::new();
+    std::fs::File::open(path.join("SKILL.md")).map_err(|e|e.to_string())?.take(4096).read_to_string(&mut header).map_err(|e|e.to_string())?;
+    let normalized = header.replace("\r\n", "\n");
+    let yaml = normalized.strip_prefix("---\n").and_then(|s|s.split_once("\n---").map(|(h,_)|h)).ok_or("Invalid SKILL.md frontmatter")?;
+    let data: SkillFrontmatter = serde_yaml::from_str(yaml).map_err(|e|e.to_string())?;
+    let name = &data.name;
+    if name != path.file_name().and_then(|s|s.to_str()).unwrap_or("") || name.is_empty() || name.len() > 64 || name.starts_with('-') || name.ends_with('-') || name.contains("--") || !name.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'-') { return Err("Invalid skill name".into()); }
+    if data.description.is_empty() || data.description.len() > 1024 { return Err("Invalid skill description".into()); }
+    Ok(SkillMetadata { name: data.name, description: data.description, source: source.to_string() })
+}
+
+#[tauri::command]
+fn save_skill_directories(state: State<AppState>, directories: Vec<String>) -> Result<(), String> {
+    if directories.len() > 5 { return Err("Можно добавить не более пяти каталогов навыков".into()); }
+    let values: Vec<PathBuf> = directories.into_iter().map(|name| {
+        let path = PathBuf::from(&name);
+        if !path.is_absolute() || name.len() > 1024 { return Err("Укажите абсолютный путь к каталогу навыков".into()); }
+        let canonical = path.canonicalize().map_err(|e|format!("Не удалось открыть каталог {name}: {e}"))?;
+        if !canonical.is_dir() || canonical.parent().is_none() { return Err(format!("Некорректный каталог {name}")); }
+        Ok(canonical)
+    }).collect::<Result<_,String>>()?;
+    let serialized = serde_json::to_string(&values).map_err(|e|e.to_string())?;
+    state.db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('skill_directories',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![serialized]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_skills(app: tauri::AppHandle, state: State<AppState>) -> Result<Vec<SkillMetadata>, String> {
+    let db = state.db.lock().map_err(|e|e.to_string())?;
+    let custom = skill_directories(&db)?;
+    drop(db);
+    let resource = app.path().resource_dir().map_err(|e|e.to_string())?;
+    let built_in = if resource.join("skills").is_dir() { resource.join("skills") } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills") };
+    let mut skills = Vec::new();
+    for (root, source) in std::iter::once((built_in,"Встроенный".to_string())).chain(custom.into_iter().map(|p| { let label=p.display().to_string(); (p,label) })) {
+        for entry in std::fs::read_dir(&root).map_err(|e|format!("Cannot read {}: {e}",root.display()))?.take(100) {
+            let entry = entry.map_err(|e|e.to_string())?;
+            if entry.file_type().map_err(|e|e.to_string())?.is_dir() && std::fs::symlink_metadata(entry.path().join("SKILL.md")).is_ok_and(|m|m.file_type().is_file()) {
+                skills.push(read_skill_metadata(&entry.path(), &source).map_err(|e|format!("{}: {e}",entry.path().display()))?);
+            }
+        }
+    }
+    Ok(skills)
+}
 
 fn app_dir() -> Result<PathBuf, String> {
     let base = dirs::data_local_dir().ok_or("No local data directory")?;
@@ -126,9 +191,18 @@ fn codex_logged_in(success: bool, stdout: &str, stderr: &str) -> bool {
     success && (stdout.trim().starts_with("Logged in") || stderr.trim().starts_with("Logged in"))
 }
 
+fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
+    let filename = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join(&filename);
+    if resource.is_file() { return Ok(resource); }
+    let beside_app = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name(filename);
+    if beside_app.is_file() { return Ok(beside_app); }
+    Err(format!("Исполняемый компонент {name} не найден. Переустановите приложение."))
+}
+
 #[tauri::command]
-fn auth_status() -> AuthStatus {
-    let status = Command::new("codex").args(["login","status"]).output();
+fn auth_status(app: tauri::AppHandle) -> AuthStatus {
+    let status = bundled_binary(&app, "educatioharness-codex").and_then(|path| Command::new(path).args(["login","status"]).output().map_err(|e|e.to_string()));
     let (installed, authenticated, detail) = match status {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -143,14 +217,14 @@ fn auth_status() -> AuthStatus {
 }
 
 #[tauri::command]
-fn codex_login() -> Result<(), String> {
-    Command::new("codex").arg("login").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+fn codex_login(app: tauri::AppHandle) -> Result<(), String> {
+    Command::new(bundled_binary(&app,"educatioharness-codex")?).arg("login").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn codex_logout() -> Result<(), String> {
-    let result = Command::new("codex").arg("logout").output().map_err(|e| e.to_string())?;
+fn codex_logout(app: tauri::AppHandle) -> Result<(), String> {
+    let result = Command::new(bundled_binary(&app,"educatioharness-codex")?).arg("logout").output().map_err(|e| e.to_string())?;
     if result.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&result.stderr).to_string()) }
 }
 
@@ -166,11 +240,22 @@ fn remove_api_key() -> Result<(), String> { keyring::Entry::new("educatio-harnes
 #[derive(Deserialize)]
 struct AgentRequest { request_id: String, operation: String, provider: String, model: String, input: Value, skill: String, session_id: Option<String> }
 
-fn wait_for_agent(mut child: Child, cancelled: &AtomicBool, timeout: Duration) -> Result<Output, String> {
+fn wait_for_agent<F: Fn(&str) + Send + 'static>(mut child: Child, cancelled: &AtomicBool, timeout: Duration, on_line: F) -> Result<Output, String> {
     let started = Instant::now();
-    let mut stdout = child.stdout.take().ok_or("Missing runtime stdout")?;
+    let stdout = child.stdout.take().ok_or("Missing runtime stdout")?;
     let mut stderr = child.stderr.take().ok_or("Missing runtime stderr")?;
-    let stdout_reader = std::thread::spawn(move || { let mut data = Vec::new(); stdout.read_to_end(&mut data).map(|_| data) });
+    let stdout_reader = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut data = Vec::new();
+        loop {
+            let mut line = Vec::new();
+            let count = reader.read_until(b'\n', &mut line)?;
+            if count == 0 { break; }
+            if let Ok(text) = std::str::from_utf8(&line) { on_line(text); }
+            data.extend_from_slice(&line);
+        }
+        Ok::<Vec<u8>,std::io::Error>(data)
+    });
     let stderr_reader = std::thread::spawn(move || { let mut data = Vec::new(); stderr.read_to_end(&mut data).map(|_| data) });
     let status = loop {
         if cancelled.load(Ordering::Relaxed) {
@@ -215,12 +300,15 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
     let bundled = resource.join("agent-runtime/main.mjs");
     let script = if bundled.exists() { bundled } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent-runtime/dist/main.js") };
     if !script.exists() { return Err("Agent runtime is missing. Run npm run runtime:build".into()); }
-    let resource_sidecar = resource.join("educatioharness-node");
-    let installed_sidecar = std::env::current_exe().map_err(|e|e.to_string())?.with_file_name("educatioharness-node");
-    let sidecar = if resource_sidecar.exists() { resource_sidecar } else { installed_sidecar };
-    if !sidecar.exists() { return Err("Node sidecar is missing from the application package".into()); }
+    let sidecar = bundled_binary(&app,"educatioharness-node")?;
+    let codex_binary = if request.provider == "codex" { Some(bundled_binary(&app,"educatioharness-codex")?) } else { None };
     let skills = if resource.join("skills").exists() { resource.join("skills") } else { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills") };
-    let payload = json!({"operation":request.operation,"provider":request.provider,"model":request.model,"input":request.input,"skill":request.skill,"sessionId":request.session_id});
+    let extra_skills = {
+        let state = app.state::<AppState>();
+        let db = state.db.lock().map_err(|e|e.to_string())?;
+        skill_directories(&db)?
+    };
+    let payload = json!({"operation":request.operation,"provider":request.provider,"model":request.model,"input":request.input,"skill":request.skill,"skillDirectories":extra_skills,"sessionId":request.session_id});
     let runs = app.state::<AppState>().runs.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     {
@@ -228,21 +316,32 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
         if active.contains_key(&request.request_id) { return Err("Request ID is already active".into()); }
         active.insert(request.request_id.clone(), cancelled.clone());
     }
+    let request_id = request.request_id.clone();
+    let event_request_id = request_id.clone();
     let work = tauri::async_runtime::spawn_blocking(move || {
         let mut command = Command::new(&sidecar);
         let runtime_dir = script.parent().ok_or("Agent runtime path is invalid")?;
         command.arg(&script).current_dir(runtime_dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command.env("EDUCATIOHARNESS_SKILLS_DIR", skills);
-        command.env("EDUCATIOHARNESS_CODEX_PATH", "codex");
+        if let Some(path) = codex_binary { command.env("EDUCATIOHARNESS_CODEX_PATH", path); }
         if let Some(key) = key { command.env("OPENAI_API_KEY", key); }
         let mut child = command.spawn().map_err(|e| format!("Cannot start agent runtime: {e}"))?;
         child.stdin.take().ok_or("Missing runtime stdin")?.write_all(payload.to_string().as_bytes()).map_err(|e|e.to_string())?;
-        let output = wait_for_agent(child, &cancelled, Duration::from_secs(180))?;
-        let response: Value = serde_json::from_slice(&output.stdout).map_err(|_|format!("Agent runtime failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(500).collect::<String>()))?;
+        let app_for_events = app.clone();
+        let output = wait_for_agent(child, &cancelled, Duration::from_secs(180), move |line| {
+            if let Ok(event) = serde_json::from_str::<Value>(line) {
+                if event.get("type").and_then(Value::as_str) == Some("progress") {
+                    let _ = app_for_events.emit("agent-progress", json!({"requestId":event_request_id,"chars":event.get("chars").and_then(Value::as_u64).unwrap_or(0)}));
+                }
+            }
+        })?;
+        let final_line = output.stdout.split(|b| *b == b'\n').find(|line| line.starts_with(b"{\"type\":\"result\""))
+            .ok_or_else(||format!("Agent runtime failed: {}", String::from_utf8_lossy(&output.stderr).chars().take(500).collect::<String>()))?;
+        let response: Value = serde_json::from_slice(final_line).map_err(|e|format!("Invalid agent response: {e}"))?;
         if response.get("ok") == Some(&Value::Bool(true)) { Ok(response.get("data").cloned().unwrap_or(Value::Null)) }
         else { Err(response.get("error").and_then(Value::as_str).unwrap_or("Agent request failed").to_string()) }
     }).await.map_err(|e|e.to_string());
-    runs.lock().map_err(|e| e.to_string())?.remove(&request.request_id);
+    runs.lock().map_err(|e| e.to_string())?.remove(&request_id);
     work?
 }
 
@@ -250,7 +349,7 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
 pub fn run() {
     let db = open_db().expect("Cannot initialize local database");
     tauri::Builder::default().manage(AppState { db: Mutex::new(db), runs: Arc::new(Mutex::new(HashMap::new())) })
-        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent])
+        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<AppState>();
@@ -283,19 +382,28 @@ mod tests {
         assert!(conn.execute("INSERT INTO sessions VALUES ('s','missing','probe','C','t','t')",[]).is_err());
     }
     #[test]
+    #[cfg(unix)]
     fn cancellation_stops_child_process() {
         let child = Command::new("sleep").arg("5").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let cancelled = AtomicBool::new(true);
         let started = Instant::now();
-        let result = wait_for_agent(child, &cancelled, Duration::from_secs(1));
+        let result = wait_for_agent(child, &cancelled, Duration::from_secs(1), |_| {});
         assert!(result.unwrap_err().contains("отменён"));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
     #[test]
+    #[cfg(unix)]
     fn large_runtime_output_does_not_block() {
         let child = Command::new("head").args(["-c", "131072", "/dev/zero"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
-        let output = wait_for_agent(child, &AtomicBool::new(false), Duration::from_secs(3)).unwrap();
+        let output = wait_for_agent(child, &AtomicBool::new(false), Duration::from_secs(3), |_| {}).unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 131072);
+    }
+    #[test]
+    fn built_in_skills_have_valid_discoverable_metadata() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills");
+        let probe = read_skill_metadata(&root.join("knowledge-probe"), "Встроенный").unwrap();
+        assert_eq!(probe.name, "knowledge-probe");
+        assert!(!probe.description.is_empty());
     }
 }

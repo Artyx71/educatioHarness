@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentResult, AuthStatus, Operation, Provider, Snapshot } from './types';
+import type { AgentResult, AuthStatus, Operation, Provider, SkillMetadata, Snapshot } from './types';
 
 export const id = () => crypto.randomUUID();
 export const now = () => new Date().toISOString();
@@ -17,6 +17,8 @@ export const api = {
   logout: () => invoke<void>('codex_logout'),
   saveKey: (key:string) => invoke<void>('save_api_key',{key}),
   removeKey: () => invoke<void>('remove_api_key'),
+  listSkills: () => invoke<SkillMetadata[]>('list_skills'),
+  saveSkillDirectories: (directories:string[]) => invoke<void>('save_skill_directories',{directories}),
   agent: async <T>(operation:Operation,provider:Provider,model:string,input:unknown,skill:string,sessionId?:string) => {
     const requestId = id();
     activeAgentRequest = requestId;

@@ -10,7 +10,7 @@ async function request(operation,input){
   let output='',error='';child.stdout.on('data',c=>output+=c);child.stderr.on('data',c=>error+=c);
   child.stdin.end(JSON.stringify({operation,provider:'codex',model:'default',input,skill:names[operation]}));
   const code=await new Promise((done,reject)=>{child.on('error',reject);child.on('exit',done)});
-  const response=JSON.parse(output);if(code!==0||!response.ok) throw new Error(`${operation}: ${response.error??error}`);
+  const response=JSON.parse(output.trim().split('\n').at(-1));if(code!==0||!response.ok) throw new Error(`${operation}: ${response.error??error}`);
   console.log(`${operation}: ok (${response.data._execution.durationMs} ms)`);
   return response.data;
 }

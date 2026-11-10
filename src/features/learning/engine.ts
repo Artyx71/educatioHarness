@@ -1,7 +1,7 @@
 import { api, id, now } from '../../lib/api';
 import type { AgentResult, Operation, Provider, Snapshot, Topic } from '../../lib/types';
 
-export type Config = { provider:Provider; model:string };
+export type Config = { provider:Provider; model:string; skillOverrides?:Record<string,string> };
 type Probe = { questions:{question:string;rationale:string;strand:string}[];context:string };
 type Evaluation = { observations:{strand:string;observed:string;inferred:string;gap:string}[];startingPoint:string;summary:string };
 type Curriculum = { approach:string;topics:{id:string;title:string;description:string;prerequisites:string[];objectives:string[];difficulty:string}[] };
@@ -19,7 +19,9 @@ async function call<T>(config:Config,operation:Operation,input:unknown,sessionId
   const threadId = sessionId ? snapshot.preferences.find(p=>p.key===threadKey)?.value : undefined;
   const started = Date.now();
   try {
-    const result = await api.agent<T>(operation,config.provider,config.model,input,skill[operation],threadId);
+    const selected = config.skillOverrides?.[operation];
+    const skillName = selected && /^[a-z][a-z0-9-]{0,60}$/.test(selected) ? selected : skill[operation];
+    const result = await api.agent<T>(operation,config.provider,config.model,input,skillName,threadId);
     if(sessionId && result._execution.sessionId) await api.save('preferences',{key:threadKey,value:result._execution.sessionId});
     await api.save('agent_executions',{id:id(),session_id:sessionId??'',provider:config.provider,model:config.model,operation,status:'completed',duration_ms:String(result._execution.durationMs),metadata:JSON.stringify({usage:result._execution.usage??null}),created_at:now()});
     return result;

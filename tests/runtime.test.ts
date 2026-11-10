@@ -8,6 +8,7 @@ describe('agent protocol boundaries',()=>{
   it('rejects unknown operations before any provider request',()=>{
     const child=spawnSync(process.execPath,['agent-runtime/dist/main.js'],{input:JSON.stringify({operation:'delete_files',provider:'codex',model:'default',input:{},skill:'knowledge-probe'}),encoding:'utf8'});
     expect(child.status).toBe(1);
+    expect(JSON.parse(child.stdout).type).toBe('result');
     expect(JSON.parse(child.stdout).ok).toBe(false);
   });
   it('rejects path traversal in skill names',()=>{
