@@ -13,6 +13,7 @@ import { Markdown } from '../components/Markdown';
 import { phaseLabel, exerciseLabel, verdictLabel } from '../lib/i18n';
 
 const empty:Snapshot={learning_goals:[],sessions:[],messages:[],diagnostic_answers:[],curricula:[],topics:[],exercises:[],attempts:[],knowledge_nodes:[],knowledge_edges:[],knowledge_provenance:[],workflow_executions:[],agent_executions:[],preferences:[]};
+const defaultApiModel='gpt-6.1-sol';
 
 export default function App() {
   const qc=useQueryClient(); const ui=useUi();
@@ -31,7 +32,7 @@ export default function App() {
   useEffect(()=>{const value=snap.preferences.find(p=>p.key==='model')?.value;if(value) setModel(value)},[snap.preferences]);
   const savedDirectories=snap.preferences.find(p=>p.key==='skill_directories')?.value??'[]';
   const savedOverrides=snap.preferences.find(p=>p.key==='skill_overrides')?.value??'{}';
-  const config:Config={provider,model:model|| (provider==='codex'?'default':'gpt-5.4'),skillOverrides:parseSkillOverrides(savedOverrides)};
+  const config:Config={provider,model:model|| (provider==='codex'?'default':defaultApiModel),skillOverrides:parseSkillOverrides(savedOverrides)};
   const connected=provider==='codex'?auth?.codex_authenticated:auth?.api_key_saved;
   const refresh=async()=>{await qc.invalidateQueries({queryKey:['snapshot']});await refreshAuth()};
   async function run(label:string,fn:()=>Promise<unknown>){setError('');setProgressChars(0);setBusy(label);try{await fn();await refresh()}catch(e){setError(String(e))}finally{setBusy('');setProgressChars(0)}}
@@ -45,7 +46,7 @@ export default function App() {
     <div className="session-list">{snap.sessions.slice().reverse().filter(s=>s.title.toLocaleLowerCase('ru').includes(sessionSearch.toLocaleLowerCase('ru'))).map(s=><button key={s.id} className={session?.id===s.id&&ui.page==='learn'?'selected':''} onClick={()=>{ui.setSession(s.id);ui.setGoal(s.goal_id);ui.setPage('learn')}}><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)}</small></button>)}{!snap.sessions.length&&<p>Пока нет занятий</p>}</div>
     <div className="sidebar-bottom ref-bottom"><button onClick={()=>ui.setPage('graph')}><Network size={15}/> ГРАФ ЗНАНИЙ</button><button onClick={()=>ui.setPage('settings')}><Settings2 size={15}/> НАСТРОЙКИ</button><div className={`status ${connected?'online':'offline'}`}><span/>{connected?`${provider==='codex'?'ChatGPT':'OpenAI API'} подключён`:'ИИ не подключён'}</div>{authError&&<p className="warn">{String(authError)}</p>}</div>
   </aside><main className="main">
-    {mustConnect&&ui.page!=='settings'?<Connect auth={auth} busy={busy} error={error} onLogin={()=>run('Вход',async()=>{await api.login();await new Promise(r=>setTimeout(r,1500));await refreshAuth()})} onKey={key=>run('Сохранение ключа',async()=>{await api.saveKey(key);await saveConfig('openai','gpt-5.4')})} onSettings={()=>ui.setPage('settings')}/>:
+    {mustConnect&&ui.page!=='settings'?<Connect auth={auth} busy={busy} error={error} onLogin={()=>run('Вход',async()=>{await api.login();await new Promise(r=>setTimeout(r,1500));await refreshAuth()})} onKey={key=>run('Сохранение ключа',async()=>{await api.saveKey(key);await saveConfig('openai',defaultApiModel)})} onSettings={()=>ui.setPage('settings')}/>:
     ui.page==='dashboard'?<Dashboard snap={snap} goalId={goal?.id} busy={busy} onStart={()=>ui.setPage('learn')} onPractice={()=>ui.setPage('practice')} onCreate={objective=>run('Подготовка диагностики',async()=>{const started=await startGoal(objective,config);ui.setGoal(started.goalId);ui.setSession(started.sessionId);ui.setPage('learn')})}/>:
     ui.page==='learn'?<Learn snap={snap} goalId={goal?.id} sessionId={session?.id} topics={topics} topic={topic} config={config} busy={busy} run={run} onGoal={(g,s)=>{ui.setGoal(g);ui.setSession(s)}} onTopic={ui.setTopic}/>:
     ui.page==='graph'?<Graph nodes={snap.knowledge_nodes.filter(n=>n.goal_id===goal?.id)} edges={snap.knowledge_edges.filter(e=>e.goal_id===goal?.id)} sessions={snap.sessions} provenance={snap.knowledge_provenance} onSave={node=>run('Сохранение утверждения',()=>api.save('knowledge_nodes',node))} onDelete={id=>run('Удаление утверждения',()=>api.remove('knowledge_nodes',id))}/>:
@@ -100,8 +101,8 @@ function History({snap,onOpen}:{snap:Snapshot;onOpen:(id:string)=>void}){return 
 
 function Settings({auth,provider,model,busy,run,saveConfig,refreshAuth,savedDirectories,savedOverrides}:{auth?:AuthStatus;provider:Provider;model:string;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void;saveConfig:(p:Provider,m:string)=>Promise<void>;refreshAuth:()=>Promise<unknown>;savedDirectories:string;savedOverrides:string}){
   const [key,setKey]=useState('');const [message,setMessage]=useState('');
-  const modelOptions=provider==='codex'?[{id:'default',label:'Авто',hint:'Выбор Codex'},{id:'gpt-5.4',label:'GPT-5.4',hint:'Фиксированная'}]:[{id:'gpt-5.4',label:'GPT-5.4',hint:'Точнее'},{id:'gpt-5.4-mini',label:'GPT-5.4 mini',hint:'Быстрее'}];
-  const activeModel=model||(provider==='codex'?'default':'gpt-5.4');
+  const modelOptions=provider==='codex'?[{id:'default',label:'Авто',hint:'Выбор Codex'},{id:'gpt-6.1-sol',label:'Sol',hint:'Проверено в Codex'}]:[{id:'gpt-6.1-sol',label:'Sol',hint:'Сильнее'},{id:'gpt-6.1-terra',label:'Terra',hint:'Баланс'},{id:'gpt-6-luna',label:'Luna',hint:'Быстрее'}];
+  const activeModel=model||(provider==='codex'?'default':defaultApiModel);
   const modelChoices=modelOptions.some(option=>option.id===activeModel)?modelOptions:[...modelOptions,{id:activeModel,label:activeModel,hint:'Ранее выбранная'}];
   const config={provider,model:activeModel};
   return <div className="page settings-page">
@@ -109,7 +110,7 @@ function Settings({auth,provider,model,busy,run,saveConfig,refreshAuth,savedDire
     <div className="settings-grid">
       <div className="panel">
         <h2>Провайдер ИИ</h2><p>ChatGPT использует сессию Codex CLI. Запросы по API-ключу оплачиваются отдельно.</p>
-        <label>Провайдер<select value={provider} onChange={e=>run('Смена провайдера',()=>saveConfig(e.target.value as Provider,e.target.value==='codex'?'default':'gpt-5.4'))}><option value="codex">ChatGPT через Codex</option><option value="openai">Ключ OpenAI API</option></select></label>
+        <label>Провайдер<select value={provider} onChange={e=>run('Смена провайдера',()=>saveConfig(e.target.value as Provider,e.target.value==='codex'?'default':defaultApiModel))}><option value="codex">ChatGPT через Codex</option><option value="openai">Ключ OpenAI API</option></select></label>
         <div className="model-picker"><span>Модель</span><div className="model-toggle" role="group" aria-label="Выбор модели">{modelChoices.map(option=><button key={option.id} type="button" className={activeModel===option.id?'active':''} aria-pressed={activeModel===option.id} disabled={!!busy} onClick={()=>run('Смена модели',()=>saveConfig(provider,option.id))}><strong>{option.label}</strong><small>{option.hint}</small></button>)}</div></div>
         <div className="connection"><span className={`status ${provider==='codex'?auth?.codex_authenticated?'online':'offline':auth?.api_key_saved?'online':'offline'}`}><span/>{provider==='codex'?(auth?.codex_authenticated?'Вход выполнен':'Нет подключения'):auth?.api_key_saved?'API-ключ сохранён':'API-ключ не сохранён'}</span><button className="button secondary" disabled={!!busy} onClick={()=>run('Проверка подключения',async()=>{const r=await api.agent<{connected:boolean;message:string}>('validate',config.provider,config.model,{question:'Проверь подключение'},'');setMessage(r.message)})}>Проверить подключение</button>{message&&<p className="muted">{message}</p>}</div>
       </div>
