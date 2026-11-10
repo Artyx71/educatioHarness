@@ -37,4 +37,11 @@ describe('persistent workflow transitions',()=>{
     expect(second.id).toBe('s2:teach');
     expect(JSON.parse(first.metadata)).toEqual({provider:'codex'});
   });
+  it('does not count a normal answer after waiting for the user as a retry',async()=>{
+    const input={topicId:'pointers'};
+    await transitionWorkflow({goalId:'g',sessionId:'s1',instanceId:'s1',stepId:'teach',status:'running',input});
+    await transitionWorkflow({goalId:'g',sessionId:'s1',instanceId:'s1',stepId:'teach',status:'waiting_for_user',input});
+    const continued=await transitionWorkflow({goalId:'g',sessionId:'s1',instanceId:'s1',stepId:'teach',status:'running',input:{...input,answer:'Мой ответ'}});
+    expect(continued.retry_count).toBe(0);
+  });
 });

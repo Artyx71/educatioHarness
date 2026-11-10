@@ -28,7 +28,7 @@ export async function transitionWorkflow(step:WorkflowTransition):Promise<Workfl
   const record:WorkflowExecution={
     id,goal_id:step.goalId,session_id:step.sessionId??null,step_id:step.stepId,status:step.status,
     input:JSON.stringify(step.input),output:step.output===undefined||step.output===null?'':JSON.stringify(step.output),
-    error:step.error??'',retry_count:Number(previous?.retry_count??0)+(step.status==='running'&&previous?1:0),
+    error:step.error??'',retry_count:Number(previous?.retry_count??0)+(step.status==='running'&&previous&&['running','failed','cancelled'].includes(previous.status)?1:0),
     dependencies:JSON.stringify(dependencies),metadata:JSON.stringify(step.metadata??{}),updated_at:now(),
   };
   await api.save('workflow_executions',record);
