@@ -451,7 +451,13 @@ fn save_record_db(db: &Connection, table: &str, record: Value) -> Result<(), Str
         Some(Value::Null) | None => Ok(rusqlite::types::Value::Null),
         _ => Err(format!("Invalid field {c}")),
     }).collect::<Result<_,_>>()?;
-    for c in *columns { if !["evaluation","output","error","topic_id","source_session_id","source_message_id","session_id","message_id"].contains(c) && record.get(*c).is_none_or(|v|v.is_null()||v.as_str()==Some("")) { return Err(format!("Empty {c}")); } }
+    for c in *columns {
+        let optional_text = ["evaluation","output","error","topic_id","source_session_id","source_message_id","session_id","message_id"].contains(c)
+            || *c == "reasoning" && ["attempts","diagnostic_answers"].contains(&table);
+        if !optional_text && record.get(*c).is_none_or(|v|v.is_null()||v.as_str()==Some("")) {
+            return Err(format!("Empty {c}"));
+        }
+    }
     let placeholders = vec!["?"; columns.len()].join(",");
     let primary = if table == "preferences" {"key"} else if table == "knowledge_topic_links" {"node_id,topic_id"} else {"id"};
     let updates = columns.iter().filter(|c| **c != primary).map(|c|format!("{c}=excluded.{c}")).collect::<Vec<_>>().join(",");
@@ -736,6 +742,29 @@ mod tests {
         assert_eq!(version,5);
         conn.execute("INSERT INTO learning_goals VALUES ('g','C','t','t')",[]).unwrap();
         assert!(conn.execute("INSERT INTO sessions VALUES ('s','missing','probe','C','t','t')",[]).is_err());
+    }
+    #[test]
+    fn saves_answers_without_a_separate_reasoning_field() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("INSERT INTO learning_goals VALUES ('g','C','t','t'); INSERT INTO sessions VALUES ('s','g','probe','C','t','t'); INSERT INTO exercises VALUES ('e','g',NULL,'short_answer','Что такое адрес?','Позиция в памяти','t');").unwrap();
+        save_record_db(&conn,"diagnostic_answers",json!({
+            "id":"d","session_id":"s","question":"Почему?","answer":"Потому что...",
+            "reasoning":"","evaluation":"","created_at":"t"
+        })).unwrap();
+        save_record_db(&conn,"attempts",json!({
+            "id":"a","exercise_id":"e","answer":"Адрес ячейки памяти","reasoning":"",
+            "evaluation":"{}","created_at":"t"
+        })).unwrap();
+        let diagnostic:String=conn.query_row("SELECT reasoning FROM diagnostic_answers WHERE id='d'",[],|row|row.get(0)).unwrap();
+        let practice:String=conn.query_row("SELECT reasoning FROM attempts WHERE id='a'",[],|row|row.get(0)).unwrap();
+        assert_eq!(diagnostic,"");
+        assert_eq!(practice,"");
+        assert!(save_record_db(&conn,"attempts",json!({
+            "id":"a2","exercise_id":"e","answer":"","reasoning":"",
+            "evaluation":"{}","created_at":"t"
+        })).is_err());
     }
     #[test]
     fn upgrades_v2_graph_and_preserves_topic_links() {

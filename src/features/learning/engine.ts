@@ -209,7 +209,11 @@ export async function generateExercise(goalId:string,topic:Topic,config:Config,f
 }
 
 export async function evaluateExercise(exercise:{id:string;prompt:string;solution:string},answer:string,reasoning:string,config:Config) {
-  const result=await call<PracticeEvaluation>(config,'evaluate_practice',{problem:exercise.prompt,solution:exercise.solution,answer,reasoning});
+  if(!answer.trim()) throw new Error('Сначала напишите ответ');
+  // The answer may already include an explanation. Keep that text available to
+  // the evaluator without pretending the learner filled a separate field.
+  const separateReasoning=reasoning.trim();
+  const result=await call<PracticeEvaluation>(config,'evaluate_practice',{problem:exercise.prompt,solution:exercise.solution,answer,reasoning:separateReasoning||answer.trim(),reasoningSource:separateReasoning?'separate':'answer'});
   await api.save('attempts',{id:id(),exercise_id:exercise.id,answer,reasoning,evaluation:JSON.stringify(result),created_at:now()});
   return result;
 }
