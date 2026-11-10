@@ -11,6 +11,13 @@ type PracticeEvaluation = { verdict:string;feedback:string;misconception:string;
 type Extraction = { propositions:{id:string;name:string;statement:string;sourceMessageId?:string|null}[];chains:{premises:string[];conclusion:string}[] };
 type Audit = { links:{id:string;linkTo:string|null}[] };
 
+export function parseStringList(value:string):string[] {
+  try {
+    const parsed:unknown=JSON.parse(value);
+    return Array.isArray(parsed)&&parsed.every(item=>typeof item==='string')?parsed:[];
+  } catch { return []; }
+}
+
 export function orderCurriculumTopics<T extends {id:string;prerequisites:string[]}>(topics:T[]):T[] {
   const ids=new Set(topics.map(topic=>topic.id));
   if(ids.size!==topics.length) throw new Error('Учебный план содержит повторяющиеся ID тем');
@@ -147,7 +154,7 @@ export async function teach(goalId:string,sessionId:string,topic:Topic,config:Co
   const recordedClaims=snap.knowledge_nodes.filter(item=>item.goal_id===goalId&&item.kind==='proposition').slice(-20).map(item=>item.statement);
   await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''});
   let result:AgentResult<Teaching>;
-  try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:JSON.parse(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId); }
+  try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:parseStringList(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId); }
   catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e)); throw e; }
   const text=`${result.message}\n\n**${result.questionType==='predict'?'Предположите':'Проверьте понимание'}:** ${result.question}`;
   const created=await message(sessionId,'assistant',text,'teaching');
