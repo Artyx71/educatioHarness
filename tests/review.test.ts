@@ -21,4 +21,7 @@ describe('review suggestions', () => {
   it('ignores attempts outside the current curriculum', () => {
     expect(reviewSuggestion([topic('a')],[exercise('eb','b')],[attempt('b','eb',9,'incorrect')],now)).toBeNull();
   });
+  it('does not infer learning state from unreadable evaluations', () => {
+    expect(reviewSuggestion([topic('a')],[exercise('ea','a')],[{...attempt('a','ea',9,'correct'),evaluation:'broken'}],now)).toBeNull();
+  });
 });

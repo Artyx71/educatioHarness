@@ -2,12 +2,12 @@ import type { Attempt, Exercise, Topic } from '../../lib/types';
 
 export type ReviewSuggestion = { topic: Topic; reason: 'needs_work' | 'due' };
 
-function verdict(value: string): string {
+function verdict(value: string): string | null {
   try {
     const parsed: unknown = JSON.parse(value);
     if (parsed && typeof parsed === 'object' && 'verdict' in parsed && typeof parsed.verdict === 'string') return parsed.verdict;
   } catch { /* Old or incomplete evaluation; do not infer a result. */ }
-  return 'uncertain';
+  return null;
 }
 
 export function reviewSuggestion(topics: Topic[], exercises: Exercise[], attempts: Attempt[], now = Date.now()): ReviewSuggestion | null {
@@ -25,6 +25,7 @@ export function reviewSuggestion(topics: Topic[], exercises: Exercise[], attempt
     if (!attempt) return [];
     const ageDays = (now - Date.parse(attempt.created_at)) / 86_400_000;
     const result = verdict(attempt.evaluation);
+    if (!result) return [];
     const needsWork = result === 'incorrect' || result === 'partially_correct' || result === 'uncertain';
     const threshold = needsWork ? 1 : 7;
     return ageDays >= threshold ? [{ topic, reason: needsWork ? 'needs_work' as const : 'due' as const, ageDays }] : [];
