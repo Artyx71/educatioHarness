@@ -107,5 +107,7 @@ select option{background-color:var(--field-bg);color:var(--field-text)}
 .code-answer{overflow:hidden;border:1px solid #464646;border-radius:7px;margin:15px 0;background:#1b1b1b}.answer-toolbar{display:flex;justify-content:space-between;gap:12px;padding:8px 11px;color:#888;font-size:9px;letter-spacing:.06em;border-bottom:1px solid #353535}.code-answer .cm-editor{font-size:12px;background:#181818}.code-answer .cm-gutters{background:#181818;border-right:1px solid #333;color:#777}.code-answer .cm-focused{outline:0}
 .math-answer{margin:15px 0}.math-preview{margin-top:8px;min-height:65px;padding:10px 12px;background:#181818;border:1px solid #353535;border-radius:7px}.math-preview .markdown{font-size:12px;overflow:auto}
 .react-flow__node.graph-dimmed{opacity:.4}.react-flow__node.graph-related{border-color:#a9bfac;color:#f3f3f3}.graph-relation{padding:7px 0;border-bottom:1px solid #383838}.graph-relation small{color:#8fa593}.graph-relation p{margin:4px 0;color:#ccc;font-size:11px}
+.graph-filters{display:flex;gap:8px;align-items:center}.graph-filters select{width:min(210px,26vw)}.graph-filters input{width:min(230px,26vw)}
+@media(max-width:900px){.graph-page>.section-head{align-items:stretch;flex-direction:column}.graph-filters select,.graph-filters input{width:50%;max-width:none!important}}
 @media(max-width:800px){.topic-dashboard,.activity-dashboard,.review-prompt{width:min(390px,calc(100vw - 220px))}.answer-toolbar span:last-child{display:none}}
 @media(prefers-reduced-motion:reduce){.study-card,.study-card.revealed{animation:none;transition:none}}

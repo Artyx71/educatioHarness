@@ -106,7 +106,7 @@ fn inspect_backup_file(path: &std::path::Path) -> Result<BackupInfo, String> {
     let integrity: String = db.query_row("PRAGMA integrity_check", [], |r|r.get(0)).map_err(|e|e.to_string())?;
     if integrity != "ok" { return Err("Файл базы данных повреждён".into()); }
     let version: i64 = db.query_row("PRAGMA user_version", [], |r|r.get(0)).map_err(|e|e.to_string())?;
-    if version != 2 { return Err(format!("Версия данных {version} не поддерживается (ожидается 2)")); }
+    if !(2..=4).contains(&version) { return Err(format!("Версия данных {version} не поддерживается (ожидается 2–4)")); }
     let foreign_keys: i64 = db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r|r.get(0)).map_err(|e|e.to_string())?;
     if foreign_keys != 0 { return Err("В архиве нарушены связи данных".into()); }
     let count = |table: &str| db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r|r.get(0)).map_err(|e|e.to_string());
@@ -151,6 +151,7 @@ fn import_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
     Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
     drop(safety);
     Backup::new(&source,&mut target).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
+    migrate(&target)?;
     target.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides')",[]).map_err(|e|e.to_string())?;
     Ok(info)
 }
@@ -192,7 +193,7 @@ fn export_obsidian(state: State<AppState>, directory: String) -> Result<String, 
 
 fn migrate(conn: &Connection) -> Result<(), String> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(|e| e.to_string())?;
-    if version > 2 { return Err(format!("Database version {version} is newer than this application")); }
+    if version > 4 { return Err(format!("Database version {version} is newer than this application")); }
     if version < 1 {
         conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e|e.to_string())?;
         let result = conn.execute_batch(include_str!("../../migrations/001_initial.sql"));
@@ -209,13 +210,29 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             Err(e) => { let _ = conn.execute_batch("ROLLBACK;"); return Err(e.to_string()); }
         }
     }
+    if version < 3 {
+        conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e|e.to_string())?;
+        let result = conn.execute_batch(include_str!("../../migrations/003_knowledge_topics.sql"));
+        match result {
+            Ok(()) => conn.execute_batch("PRAGMA user_version=3; COMMIT;").map_err(|e|e.to_string())?,
+            Err(e) => { let _ = conn.execute_batch("ROLLBACK;"); return Err(e.to_string()); }
+        }
+    }
+    if version < 4 {
+        conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e|e.to_string())?;
+        let result = conn.execute_batch(include_str!("../../migrations/004_guard_knowledge_topics.sql"));
+        match result {
+            Ok(()) => conn.execute_batch("PRAGMA user_version=4; COMMIT;").map_err(|e|e.to_string())?,
+            Err(e) => { let _ = conn.execute_batch("ROLLBACK;"); return Err(e.to_string()); }
+        }
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn snapshot(state: State<AppState>) -> Result<Value, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    let names = ["learning_goals","sessions","messages","diagnostic_answers","curricula","topics","exercises","attempts","knowledge_nodes","knowledge_edges","knowledge_provenance","workflow_executions","agent_executions","preferences"];
+    let names = ["learning_goals","sessions","messages","diagnostic_answers","curricula","topics","exercises","attempts","knowledge_nodes","knowledge_edges","knowledge_topic_links","knowledge_provenance","workflow_executions","agent_executions","preferences"];
     let mut out = serde_json::Map::new();
     for name in names {
         let mut stmt = db.prepare(&format!("SELECT * FROM {name} ORDER BY {}", snapshot_order(name))).map_err(|e| e.to_string())?;
@@ -245,6 +262,7 @@ fn snapshot_order(table: &str) -> &'static str {
         "learning_goals" | "sessions" | "curricula" | "workflow_executions" => "updated_at, id",
         "topics" => "curriculum_id, position, id",
         "preferences" => "key",
+        "knowledge_topic_links" => "topic_id, node_id",
         _ => "created_at, id",
     }
 }
@@ -262,6 +280,7 @@ fn save_record(state: State<AppState>, table: String, record: Value) -> Result<(
         ("attempts", &["id","exercise_id","answer","reasoning","evaluation","created_at"]),
         ("knowledge_nodes", &["id","goal_id","kind","name","statement","source_session_id","source_message_id","created_at"]),
         ("knowledge_edges", &["id","goal_id","premises","conclusion_id","source_session_id","created_at"]),
+        ("knowledge_topic_links", &["node_id","topic_id"]),
         ("knowledge_provenance", &["id","node_id","session_id","message_id","created_at"]),
         ("workflow_executions", &["id","goal_id","status","step_id","input","output","error","retry_count","updated_at"]),
         ("agent_executions", &["id","session_id","provider","model","operation","status","duration_ms","metadata","created_at"]),
@@ -280,7 +299,7 @@ fn save_record(state: State<AppState>, table: String, record: Value) -> Result<(
     }).collect::<Result<_,_>>()?;
     for c in *columns { if !["evaluation","output","error","topic_id","source_session_id","source_message_id","session_id","message_id"].contains(c) && record.get(*c).is_none_or(|v|v.is_null()||v.as_str()==Some("")) { return Err(format!("Empty {c}")); } }
     let placeholders = vec!["?"; columns.len()].join(",");
-    let primary = if table == "preferences" {"key"} else {"id"};
+    let primary = if table == "preferences" {"key"} else if table == "knowledge_topic_links" {"node_id,topic_id"} else {"id"};
     let updates = columns.iter().filter(|c| **c != primary).map(|c|format!("{c}=excluded.{c}")).collect::<Vec<_>>().join(",");
     let query = format!("INSERT INTO {table} ({}) VALUES ({placeholders}) ON CONFLICT({primary}) DO UPDATE SET {updates}", columns.join(","));
     state.db.lock().map_err(|e| e.to_string())?.execute(&query, rusqlite::params_from_iter(values)).map_err(|e| e.to_string())?;
@@ -537,9 +556,53 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         migrate(&conn).unwrap(); migrate(&conn).unwrap();
         let version:i64 = conn.query_row("PRAGMA user_version",[],|r|r.get(0)).unwrap();
-        assert_eq!(version,2);
+        assert_eq!(version,4);
         conn.execute("INSERT INTO learning_goals VALUES ('g','C','t','t')",[]).unwrap();
         assert!(conn.execute("INSERT INTO sessions VALUES ('s','missing','probe','C','t','t')",[]).is_err());
+    }
+    #[test]
+    fn upgrades_v2_graph_and_preserves_topic_links() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_initial.sql")).unwrap();
+        conn.execute_batch(include_str!("../../migrations/002_provenance.sql")).unwrap();
+        conn.execute_batch("PRAGMA user_version=2;").unwrap();
+        conn.execute("INSERT INTO learning_goals VALUES ('g','C','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO curricula VALUES ('c','g','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO topics VALUES ('t','c','Указатели','desc','[]','[]','intro','pending',0)",[]).unwrap();
+        conn.execute("INSERT INTO knowledge_nodes VALUES ('n','g','concept','Указатели','desc',NULL,NULL,'t')",[]).unwrap();
+        migrate(&conn).unwrap();
+        let linked:i64=conn.query_row("SELECT count(*) FROM knowledge_topic_links WHERE node_id='n' AND topic_id='t'",[],|row|row.get(0)).unwrap();
+        assert_eq!(linked,1);
+        conn.execute("INSERT INTO learning_goals VALUES ('g2','Rust','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO curricula VALUES ('c2','g2','t','t')",[]).unwrap();
+        conn.execute("INSERT INTO topics VALUES ('t2','c2','Ownership','desc','[]','[]','intro','pending',0)",[]).unwrap();
+        assert!(conn.execute("INSERT INTO knowledge_topic_links VALUES ('n','t2')",[]).is_err());
+        let version:i64=conn.query_row("PRAGMA user_version",[],|row|row.get(0)).unwrap();
+        assert_eq!(version,4);
+    }
+    #[test]
+    fn v2_backup_can_be_inspected_and_imported_into_current_schema() {
+        let path = std::env::temp_dir().join(format!("educatio-v2-{}.sqlite3",uuid::Uuid::new_v4()));
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(include_str!("../../migrations/001_initial.sql")).unwrap();
+        old.execute_batch(include_str!("../../migrations/002_provenance.sql")).unwrap();
+        old.execute_batch("PRAGMA user_version=2; INSERT INTO learning_goals VALUES ('g','C','t','t');").unwrap();
+        drop(old);
+        let info=inspect_backup_file(&path).unwrap();
+        assert_eq!(info.version,2);
+        assert_eq!(info.goals,1);
+        let source=Connection::open_with_flags(&path,OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut target=Connection::open_in_memory().unwrap();
+        migrate(&target).unwrap();
+        Backup::new(&source,&mut target).unwrap().run_to_completion(100,Duration::from_millis(1),None).unwrap();
+        migrate(&target).unwrap();
+        let version:i64=target.query_row("PRAGMA user_version",[],|row|row.get(0)).unwrap();
+        let title:String=target.query_row("SELECT title FROM learning_goals WHERE id='g'",[],|row|row.get(0)).unwrap();
+        assert_eq!(version,4);
+        assert_eq!(title,"C");
+        drop(source);
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn snapshots_order_recent_goals_and_sessions_by_update_time() {

@@ -96,6 +96,7 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
   for(const [position,t] of curriculum.topics.entries()) {
     await api.save('topics',{id:ids.get(t.id),curriculum_id:curriculumId,title:t.title,description:t.description,prerequisites:JSON.stringify(t.prerequisites.map(p=>ids.get(p)).filter(Boolean)),objectives:JSON.stringify(t.objectives),difficulty:t.difficulty,status:'pending',position:String(position)});
     if(!snap.knowledge_nodes.some(n=>n.id===conceptIds.get(t.id))) await api.save('knowledge_nodes',{id:conceptIds.get(t.id),goal_id:goalId,kind:'concept',name:t.title,statement:t.description,source_session_id:sessionId,source_message_id:'',created_at:now()});
+    await api.save('knowledge_topic_links',{node_id:conceptIds.get(t.id),topic_id:t.id});
   }
   for(const t of curriculum.topics) for(const prerequisite of t.prerequisites) {
     const premise=conceptIds.get(prerequisite),conclusion=conceptIds.get(t.id);
@@ -133,10 +134,10 @@ export async function teach(goalId:string,sessionId:string,topic:Topic,config:Co
   await api.save('topics',{...topic,status:'in_progress',position:String(topic.position)});
   const session=snap.sessions.find(item=>item.id===sessionId);
   if(session) await api.save('sessions',{...session,updated_at:now()});
-  await extract(goalId,sessionId,[created],config).catch(()=>{});
+  await extract(goalId,sessionId,topic.id,[created],config).catch(()=>{});
 }
 
-async function extract(goalId:string,sessionId:string,messages:{id:string;content:string}[],config:Config) {
+async function extract(goalId:string,sessionId:string,topicId:string,messages:{id:string;content:string}[],config:Config) {
   const snap=await api.snapshot();
   const extracted=await call<Extraction>(config,'extract',{messages:messages.map(m=>({messageId:m.id,text:m.content})),existing:snap.knowledge_nodes.filter(n=>n.goal_id===goalId).map(n=>({id:n.id,statement:n.statement}))},sessionId);
   if(!extracted.propositions.length) return;
@@ -148,6 +149,7 @@ async function extract(goalId:string,sessionId:string,messages:{id:string;conten
     const nodeId=valid?linked!:id(); ids.set(p.id,nodeId);
     const sourceMessageId=p.sourceMessageId&&messages.some(m=>m.id===p.sourceMessageId)?p.sourceMessageId:messages[0].id;
     if(!valid) await api.save('knowledge_nodes',{id:nodeId,goal_id:goalId,kind:'proposition',name:p.name,statement:p.statement,source_session_id:sessionId,source_message_id:sourceMessageId,created_at:now()});
+    await api.save('knowledge_topic_links',{node_id:nodeId,topic_id:topicId});
     if(!snap.knowledge_provenance.some(v=>v.node_id===nodeId&&v.message_id===sourceMessageId)) await api.save('knowledge_provenance',{id:id(),node_id:nodeId,session_id:sessionId,message_id:sourceMessageId,created_at:now()});
   }
   for(const chain of extracted.chains) { const premises=chain.premises.map(p=>ids.get(p)).filter((v):v is string=>!!v); const conclusion=ids.get(chain.conclusion); if(!premises.length||!conclusion) continue; const key=`${[...premises].sort().join('+')}>${conclusion}`; if(snap.knowledge_edges.some(e=>`${JSON.parse(e.premises).sort().join('+')}>${e.conclusion_id}`===key)) continue; await api.save('knowledge_edges',{id:id(),goal_id:goalId,premises:JSON.stringify(premises),conclusion_id:conclusion,source_session_id:sessionId,created_at:now()}); }
