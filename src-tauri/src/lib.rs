@@ -78,14 +78,139 @@ fn app_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+const DATABASE_FILE: &str = "educatio-harness.sqlite3";
+const DATA_LOCATION_FILE: &str = "data-directory.json";
+
+#[derive(Serialize, Deserialize)]
+struct DataLocation {
+    directory: PathBuf,
+}
+
+fn resolve_db_path(
+    default_dir: &std::path::Path,
+    legacy_path: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let config_path = default_dir.join(DATA_LOCATION_FILE);
+    if std::fs::symlink_metadata(&config_path).is_ok() {
+        if !std::fs::symlink_metadata(&config_path)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_file()
+        {
+            return Err("Некорректный файл расположения данных".into());
+        }
+        let config: DataLocation =
+            serde_json::from_slice(&std::fs::read(&config_path).map_err(|e| e.to_string())?)
+                .map_err(|e| format!("Не удалось прочитать расположение данных: {e}"))?;
+        let directory = config
+            .directory
+            .canonicalize()
+            .map_err(|e| format!("Каталог данных недоступен: {e}"))?;
+        let database = directory.join(DATABASE_FILE);
+        if !database.is_file() {
+            return Err(format!("База данных не найдена: {}", database.display()));
+        }
+        return Ok(database);
+    }
+    let default_path = default_dir.join(DATABASE_FILE);
+    Ok(if !default_path.exists() && legacy_path.exists() {
+        legacy_path.to_path_buf()
+    } else {
+        default_path
+    })
+}
+
 fn open_db() -> Result<Connection, String> {
-    let new_path = app_dir()?.join("educatio-harness.sqlite3");
-    let legacy_path = dirs::data_local_dir().ok_or("No local data directory")?.join("my-harness/my-harness.sqlite3");
-    let db_path = if !new_path.exists() && legacy_path.exists() { legacy_path } else { new_path };
+    let default_dir = app_dir()?;
+    let legacy_path = dirs::data_local_dir()
+        .ok_or("No local data directory")?
+        .join("my-harness/my-harness.sqlite3");
+    let db_path = resolve_db_path(&default_dir, &legacy_path)?;
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
-    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;").map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
+        .map_err(|e| e.to_string())?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+#[tauri::command]
+fn data_location(state: State<AppState>) -> Result<String, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.path()
+        .map(str::to_owned)
+        .ok_or("Не удалось определить путь к базе данных".into())
+}
+
+fn copy_database_to_directory(
+    db: &Connection,
+    selected: &std::path::Path,
+    default_dir: &std::path::Path,
+) -> Result<PathBuf, String> {
+    if !selected.is_absolute() || selected.as_os_str().len() > 4096 {
+        return Err("Выберите абсолютный путь к каталогу данных".into());
+    }
+    let metadata = std::fs::symlink_metadata(selected).map_err(|e| e.to_string())?;
+    if !metadata.file_type().is_dir() {
+        return Err("Выберите обычный каталог, не ссылку".into());
+    }
+    let parent = selected.canonicalize().map_err(|e| e.to_string())?;
+    let destination_dir = parent.join("educatioHarness");
+    std::fs::create_dir_all(&destination_dir).map_err(|e| e.to_string())?;
+    if !std::fs::symlink_metadata(&destination_dir)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_dir()
+    {
+        return Err("Папка назначения не должна быть ссылкой".into());
+    }
+    let destination = destination_dir.join(DATABASE_FILE);
+    if std::fs::symlink_metadata(&destination).is_ok() {
+        return Err(format!(
+            "В выбранном каталоге уже есть база: {}",
+            destination.display()
+        ));
+    }
+    let config_path = default_dir.join(DATA_LOCATION_FILE);
+    if std::fs::symlink_metadata(&config_path).is_ok_and(|meta| !meta.file_type().is_file()) {
+        return Err("Некорректный файл расположения данных".into());
+    }
+    let temporary = destination_dir.join(format!(".copy-{}.sqlite3", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut copy = Connection::open(&temporary).map_err(|e| e.to_string())?;
+        Backup::new(db, &mut copy)
+            .and_then(|backup| backup.run_to_completion(100, Duration::from_millis(10), None))
+            .map_err(|e| e.to_string())?;
+        drop(copy);
+        inspect_backup_file(&temporary)?;
+        std::fs::rename(&temporary, &destination).map_err(|e| e.to_string())?;
+        let config = serde_json::to_vec(&DataLocation {
+            directory: destination_dir,
+        })
+        .map_err(|e| e.to_string())?;
+        std::fs::write(config_path, config).map_err(|e| e.to_string())?;
+        Ok(destination)
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+#[tauri::command]
+fn move_data_directory(app: tauri::AppHandle, directory: String) -> Result<(), String> {
+    if !app
+        .state::<AppState>()
+        .runs
+        .lock()
+        .map_err(|e| e.to_string())?
+        .is_empty()
+    {
+        return Err("Дождитесь завершения запроса к модели".into());
+    }
+    let default_dir = app_dir()?;
+    let state = app.state::<AppState>();
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    copy_database_to_directory(&db, &PathBuf::from(directory), &default_dir)?;
+    drop(db);
+    app.restart()
 }
 
 #[derive(Debug, Serialize)]
@@ -551,7 +676,7 @@ pub fn run() {
     let db = open_db().expect("Cannot initialize local database");
     tauri::Builder::default().manage(AppState { db: Mutex::new(db), runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_obsidian])
+        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_obsidian])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<AppState>();
@@ -780,5 +905,57 @@ mod tests {
         assert_eq!(title,"Изучить C");
         drop(from_archive);
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn data_directory_move_keeps_old_database_and_reopens_copy() {
+        let root = std::env::temp_dir().join(format!("educatio-location-{}", uuid::Uuid::new_v4()));
+        let default_dir = root.join("default");
+        let selected = root.join("selected");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        std::fs::create_dir_all(&selected).unwrap();
+        let original = default_dir.join(DATABASE_FILE);
+        let db = Connection::open(&original).unwrap();
+        migrate(&db).unwrap();
+        db.execute(
+            "INSERT INTO learning_goals VALUES ('goal','Изучить C','now','now')",
+            [],
+        )
+        .unwrap();
+        let destination = copy_database_to_directory(&db, &selected, &default_dir).unwrap();
+        assert!(original.is_file());
+        assert_eq!(
+            resolve_db_path(&default_dir, &root.join("missing-legacy.sqlite3")).unwrap(),
+            destination
+        );
+        let reopened = Connection::open(&destination).unwrap();
+        let title: String = reopened
+            .query_row(
+                "SELECT title FROM learning_goals WHERE id='goal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Изучить C");
+        assert!(copy_database_to_directory(&db, &selected, &default_dir)
+            .unwrap_err()
+            .contains("уже есть база"));
+        drop(reopened);
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn configured_missing_database_never_falls_back_to_empty_default() {
+        let root = std::env::temp_dir().join(format!("educatio-location-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(DATA_LOCATION_FILE),
+            serde_json::to_vec(&DataLocation {
+                directory: root.join("missing"),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(resolve_db_path(&root, &root.join("legacy.sqlite3")).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
