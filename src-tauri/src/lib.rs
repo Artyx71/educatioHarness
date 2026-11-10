@@ -88,7 +88,7 @@ fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct BackupInfo { goals: i64, sessions: i64, attempts: i64, version: i64 }
 
 fn backup_path(path: &str, must_exist: bool) -> Result<PathBuf, String> {
@@ -107,10 +107,25 @@ fn inspect_backup_file(path: &std::path::Path) -> Result<BackupInfo, String> {
     if integrity != "ok" { return Err("Файл базы данных повреждён".into()); }
     let version: i64 = db.query_row("PRAGMA user_version", [], |r|r.get(0)).map_err(|e|e.to_string())?;
     if !(2..=5).contains(&version) { return Err(format!("Версия данных {version} не поддерживается (ожидается 2–5)")); }
+    let trusted=Connection::open_in_memory().map_err(|e|e.to_string())?;
+    trusted.execute_batch(include_str!("../../migrations/001_initial.sql")).map_err(|e|e.to_string())?;
+    trusted.execute_batch(include_str!("../../migrations/002_provenance.sql")).map_err(|e|e.to_string())?;
+    if version>=3 { trusted.execute_batch(include_str!("../../migrations/003_knowledge_topics.sql")).map_err(|e|e.to_string())?; }
+    if version>=4 { trusted.execute_batch(include_str!("../../migrations/004_guard_knowledge_topics.sql")).map_err(|e|e.to_string())?; }
+    if version>=5 { trusted.execute_batch(include_str!("../../migrations/005_workflow_contract.sql")).map_err(|e|e.to_string())?; }
+    if schema_objects(&db)? != schema_objects(&trusted)? { return Err("Архив имеет изменённую или неполную схему educatioHarness".into()); }
     let foreign_keys: i64 = db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r|r.get(0)).map_err(|e|e.to_string())?;
     if foreign_keys != 0 { return Err("В архиве нарушены связи данных".into()); }
     let count = |table: &str| db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r|r.get(0)).map_err(|e|e.to_string());
     Ok(BackupInfo { goals:count("learning_goals")?, sessions:count("sessions")?, attempts:count("attempts")?, version })
+}
+
+fn schema_objects(db: &Connection) -> Result<Vec<(String,String,String)>,String> {
+    db.prepare("SELECT type,name,COALESCE(sql,'') FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")
+        .map_err(|e|e.to_string())?
+        .query_map([],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+        .map_err(|e|e.to_string())?
+        .collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())
 }
 
 fn is_live_database_path(db: &Connection, path: &std::path::Path) -> bool {
@@ -628,6 +643,16 @@ mod tests {
         assert_eq!(version,5);
         assert_eq!(title,"C");
         drop(source);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn backup_rejects_unexpected_triggers_before_import() {
+        let path=std::env::temp_dir().join(format!("educatio-untrusted-{}.sqlite3",uuid::Uuid::new_v4()));
+        let conn=Connection::open(&path).unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("CREATE TRIGGER unexpected_change AFTER INSERT ON learning_goals BEGIN DELETE FROM sessions; END;").unwrap();
+        drop(conn);
+        assert!(inspect_backup_file(&path).unwrap_err().contains("изменённую"));
         std::fs::remove_file(path).unwrap();
     }
     #[test]
