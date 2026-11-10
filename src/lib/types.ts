@@ -1,0 +1,13 @@
+export type Goal = { id:string; title:string; created_at:string; updated_at:string };
+export type Session = { id:string; goal_id:string; phase:string; title:string; created_at:string; updated_at:string };
+export type Message = { id:string; session_id:string; role:'user'|'assistant'; content:string; kind:string; created_at:string };
+export type Topic = { id:string; curriculum_id:string; title:string; description:string; prerequisites:string; objectives:string; difficulty:string; status:string; position:number };
+export type Exercise = { id:string; goal_id:string; topic_id:string; kind:string; prompt:string; solution:string; created_at:string };
+export type Attempt = { id:string; exercise_id:string; answer:string; reasoning:string; evaluation:string; created_at:string };
+export type KnowledgeNode = { id:string; goal_id:string; kind:string; name:string; statement:string; source_session_id:string; source_message_id:string; created_at:string };
+export type KnowledgeEdge = { id:string; goal_id:string; premises:string; conclusion_id:string; source_session_id:string; created_at:string };
+export type Snapshot = { learning_goals:Goal[]; sessions:Session[]; messages:Message[]; diagnostic_answers: {id:string;session_id:string;question:string;answer:string;reasoning:string;evaluation:string;created_at:string}[]; curricula:{id:string;goal_id:string;created_at:string;updated_at:string}[]; topics:Topic[]; exercises:Exercise[]; attempts:Attempt[]; knowledge_nodes:KnowledgeNode[]; knowledge_edges:KnowledgeEdge[]; knowledge_provenance:{id:string;node_id:string;session_id:string;message_id:string;created_at:string}[]; workflow_executions: {id:string;goal_id:string;status:string;step_id:string;input:string;output:string;error:string;retry_count:number;updated_at:string}[]; agent_executions:unknown[]; preferences:{key:string;value:string}[] };
+export type AuthStatus = { codex_installed:boolean; codex_authenticated:boolean; api_key_saved:boolean; detail:string };
+export type Provider = 'codex'|'openai';
+export type Operation = 'probe'|'evaluate_probe'|'curriculum'|'teach'|'practice'|'evaluate_practice'|'extract'|'audit'|'validate';
+export type AgentResult<T> = T & { _execution:{durationMs:number;sessionId?:string;usage?:unknown;responseId?:string} };

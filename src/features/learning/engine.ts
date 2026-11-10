@@ -1,0 +1,143 @@
+import { api, id, now } from '../../lib/api';
+import type { AgentResult, Operation, Provider, Snapshot, Topic } from '../../lib/types';
+
+export type Config = { provider:Provider; model:string };
+type Probe = { questions:{question:string;rationale:string;strand:string}[];context:string };
+type Evaluation = { observations:{strand:string;observed:string;inferred:string;gap:string}[];startingPoint:string;summary:string };
+type Curriculum = { approach:string;topics:{id:string;title:string;description:string;prerequisites:string[];objectives:string[];difficulty:string}[] };
+type Teaching = { message:string;question:string;questionType:'predict'|'check'|'clarify';topicId:string;phase:'teach'|'remediate' };
+type Practice = { kind:string;prompt:string;solution:string;topicId:string };
+type PracticeEvaluation = { verdict:string;feedback:string;misconception:string;recommendation:string };
+type Extraction = { propositions:{id:string;name:string;statement:string;sourceMessageId?:string|null}[];chains:{premises:string[];conclusion:string}[] };
+type Audit = { links:{id:string;linkTo:string|null}[] };
+
+const skill:Record<Operation,string> = {probe:'knowledge-probe',evaluate_probe:'knowledge-probe',curriculum:'curriculum-planner',teach:'socratic-teacher',practice:'exercise-generator',evaluate_practice:'answer-evaluator',extract:'knowledge-extractor',audit:'knowledge-auditor',validate:''};
+
+async function call<T>(config:Config,operation:Operation,input:unknown,sessionId?:string):Promise<AgentResult<T>> {
+  const snapshot = await api.snapshot();
+  const threadKey=`thread:${config.provider}:${sessionId}:${operation}`;
+  const threadId = sessionId ? snapshot.preferences.find(p=>p.key===threadKey)?.value : undefined;
+  const started = Date.now();
+  try {
+    const result = await api.agent<T>(operation,config.provider,config.model,input,skill[operation],threadId);
+    if(sessionId && result._execution.sessionId) await api.save('preferences',{key:threadKey,value:result._execution.sessionId});
+    await api.save('agent_executions',{id:id(),session_id:sessionId??'',provider:config.provider,model:config.model,operation,status:'completed',duration_ms:String(result._execution.durationMs),metadata:JSON.stringify({usage:result._execution.usage??null}),created_at:now()});
+    return result;
+  } catch(error) {
+    await api.save('agent_executions',{id:id(),session_id:sessionId??'',provider:config.provider,model:config.model,operation,status:'failed',duration_ms:String(Date.now()-started),metadata:'{}',created_at:now()}).catch(()=>{});
+    throw error;
+  }
+}
+
+async function workflow(goalId:string,stepId:string,status:string,input:unknown,output:unknown=null,error='') {
+  const previous=(await api.snapshot()).workflow_executions.find(w=>w.id===`${goalId}:${stepId}`);
+  const retryCount=Number(previous?.retry_count??0)+(status==='running'&&previous?1:0);
+  await api.save('workflow_executions',{id:`${goalId}:${stepId}`,goal_id:goalId,status,step_id:stepId,input:JSON.stringify(input),output:output===null?'':JSON.stringify(output),error,retry_count:String(retryCount),updated_at:now()});
+}
+
+async function message(sessionId:string,role:'user'|'assistant',content:string,kind='text') {
+  const record={id:id(),session_id:sessionId,role,content,kind,created_at:now()};
+  await api.save('messages',record); return record;
+}
+
+export async function startGoal(title:string,config:Config) {
+  const goalId=id(), sessionId=id(), timestamp=now();
+  await api.save('learning_goals',{id:goalId,title,created_at:timestamp,updated_at:timestamp});
+  await api.save('sessions',{id:sessionId,goal_id:goalId,phase:'probe',title,created_at:timestamp,updated_at:timestamp});
+  await message(sessionId,'user',title,'goal');
+  await workflow(goalId,'probe','running',{title});
+  try {
+    const result=await call<Probe>(config,'probe',{goal:title},sessionId);
+    await workflow(goalId,'probe','waiting_for_user',{title},result);
+    for(const q of result.questions) await message(sessionId,'assistant',q.question,'diagnostic');
+  } catch(e) { await workflow(goalId,'probe','failed',{title},null,String(e)); throw e; }
+  return {goalId,sessionId};
+}
+
+export async function resumeProbe(goalId:string,sessionId:string,config:Config) {
+  const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Цель не найдена');
+  await workflow(goalId,'probe','running',{title:goal.title});
+  try {
+    const result=await call<Probe>(config,'probe',{goal:goal.title},sessionId);
+    await workflow(goalId,'probe','waiting_for_user',{title:goal.title},result);
+    for(const q of result.questions) await message(sessionId,'assistant',q.question,'diagnostic');
+  } catch(e) { await workflow(goalId,'probe','failed',{title:goal.title},null,String(e)); throw e; }
+}
+
+export async function finishProbe(goalId:string,sessionId:string,answers:{question:string;answer:string;reasoning:string}[],config:Config) {
+  const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
+  if(!snap.diagnostic_answers.some(a=>a.session_id===sessionId)) for(const a of answers) { await api.save('diagnostic_answers',{id:id(),session_id:sessionId,question:a.question,answer:a.answer,reasoning:a.reasoning,evaluation:'',created_at:now()}); await message(sessionId,'user',`${a.answer}\n\nХод мысли: ${a.reasoning}`,'diagnostic-answer'); }
+  await workflow(goalId,'probe','completed',{answers},{answered:answers.length});
+  await workflow(goalId,'evaluation','running',{answers});
+  let evaluation:AgentResult<Evaluation>;
+  try { evaluation=await call<Evaluation>(config,'evaluate_probe',{goal:goal.title,answers},sessionId); }
+  catch(e) { await workflow(goalId,'evaluation',String(e).includes('отменён')?'cancelled':'failed',{answers},null,String(e)); throw e; }
+  await workflow(goalId,'evaluation','completed',{answers},evaluation);
+  await message(sessionId,'assistant',evaluation.summary,'probe-evaluation');
+  await workflow(goalId,'curriculum','running',{evaluation});
+  let curriculum:AgentResult<Curriculum>;
+  try { curriculum=await call<Curriculum>(config,'curriculum',{goal:goal.title,answers,evaluation},sessionId); }
+  catch(e) { await workflow(goalId,'curriculum',String(e).includes('отменён')?'cancelled':'failed',{evaluation},null,String(e)); throw e; }
+  const curriculumId=id(); await api.save('curricula',{id:curriculumId,goal_id:goalId,created_at:now(),updated_at:now()});
+  const ids=new Map(curriculum.topics.map(t=>[t.id,id()]));
+  const conceptIds=new Map(curriculum.topics.map(t=>[t.id,snap.knowledge_nodes.find(n=>n.goal_id===goalId&&n.kind==='concept'&&n.name.toLocaleLowerCase('ru')===t.title.toLocaleLowerCase('ru'))?.id??id()]));
+  for(const [position,t] of curriculum.topics.entries()) {
+    await api.save('topics',{id:ids.get(t.id),curriculum_id:curriculumId,title:t.title,description:t.description,prerequisites:JSON.stringify(t.prerequisites.map(p=>ids.get(p)).filter(Boolean)),objectives:JSON.stringify(t.objectives),difficulty:t.difficulty,status:'pending',position:String(position)});
+    if(!snap.knowledge_nodes.some(n=>n.id===conceptIds.get(t.id))) await api.save('knowledge_nodes',{id:conceptIds.get(t.id),goal_id:goalId,kind:'concept',name:t.title,statement:t.description,source_session_id:sessionId,source_message_id:'',created_at:now()});
+  }
+  for(const t of curriculum.topics) for(const prerequisite of t.prerequisites) {
+    const premise=conceptIds.get(prerequisite),conclusion=conceptIds.get(t.id);
+    if(premise&&conclusion&&premise!==conclusion) await api.save('knowledge_edges',{id:id(),goal_id:goalId,premises:JSON.stringify([premise]),conclusion_id:conclusion,source_session_id:sessionId,created_at:now()});
+  }
+  await workflow(goalId,'curriculum','completed',{evaluation},curriculum);
+  await api.save('sessions',{...snap.sessions.find(s=>s.id===sessionId)!,phase:'learning',updated_at:now()});
+  await message(sessionId,'assistant',curriculum.approach,'curriculum');
+}
+
+export async function teach(goalId:string,sessionId:string,topic:Topic,config:Config,answer?:string) {
+  const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
+  if(answer) await message(sessionId,'user',answer,'teaching-answer');
+  const history=snap.messages.filter(m=>m.session_id===sessionId).slice(-20).map(m=>({role:m.role,content:m.content,kind:m.kind}));
+  await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''});
+  let result:AgentResult<Teaching>;
+  try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:JSON.parse(topic.objectives)},history,answer:answer??null},sessionId); }
+  catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e)); throw e; }
+  const text=`${result.message}\n\n**${result.questionType==='predict'?'Предположите':'Проверьте понимание'}:** ${result.question}`;
+  const created=await message(sessionId,'assistant',text,'teaching');
+  await workflow(goalId,'teach','waiting_for_user',{topicId:topic.id,answer:answer??''},result);
+  await api.save('topics',{...topic,status:'in_progress',position:String(topic.position)});
+  await extract(goalId,sessionId,[created],config).catch(()=>{});
+}
+
+async function extract(goalId:string,sessionId:string,messages:{id:string;content:string}[],config:Config) {
+  const snap=await api.snapshot();
+  const extracted=await call<Extraction>(config,'extract',{messages:messages.map(m=>({messageId:m.id,text:m.content})),existing:snap.knowledge_nodes.filter(n=>n.goal_id===goalId).map(n=>({id:n.id,statement:n.statement}))},sessionId);
+  if(!extracted.propositions.length) return;
+  const existing=snap.knowledge_nodes.filter(n=>n.goal_id===goalId);
+  const audit=await call<Audit>(config,'audit',{propositions:extracted.propositions,existing:existing.map(n=>({id:n.id,statement:n.statement}))},sessionId);
+  const links=new Map(audit.links.map(l=>[l.id,l.linkTo])); const ids=new Map<string,string>();
+  for(const p of extracted.propositions) {
+    const linked=links.get(p.id); const valid=linked&&existing.some(n=>n.id===linked);
+    const nodeId=valid?linked!:id(); ids.set(p.id,nodeId);
+    const sourceMessageId=p.sourceMessageId&&messages.some(m=>m.id===p.sourceMessageId)?p.sourceMessageId:messages[0].id;
+    if(!valid) await api.save('knowledge_nodes',{id:nodeId,goal_id:goalId,kind:'proposition',name:p.name,statement:p.statement,source_session_id:sessionId,source_message_id:sourceMessageId,created_at:now()});
+    if(!snap.knowledge_provenance.some(v=>v.node_id===nodeId&&v.message_id===sourceMessageId)) await api.save('knowledge_provenance',{id:id(),node_id:nodeId,session_id:sessionId,message_id:sourceMessageId,created_at:now()});
+  }
+  for(const chain of extracted.chains) { const premises=chain.premises.map(p=>ids.get(p)).filter((v):v is string=>!!v); const conclusion=ids.get(chain.conclusion); if(!premises.length||!conclusion) continue; const key=`${[...premises].sort().join('+')}>${conclusion}`; if(snap.knowledge_edges.some(e=>`${JSON.parse(e.premises).sort().join('+')}>${e.conclusion_id}`===key)) continue; await api.save('knowledge_edges',{id:id(),goal_id:goalId,premises:JSON.stringify(premises),conclusion_id:conclusion,source_session_id:sessionId,created_at:now()}); }
+}
+
+export async function generateExercise(goalId:string,topic:Topic,config:Config) {
+  const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
+  const attempts=snap.attempts.slice(-8).map(a=>({answer:a.answer,evaluation:a.evaluation}));
+  const result=await call<Practice>(config,'practice',{goal:goal.title,topic,attempts});
+  const exercise={id:id(),goal_id:goalId,topic_id:topic.id,kind:result.kind,prompt:result.prompt,solution:result.solution,created_at:now()};
+  await api.save('exercises',exercise); return exercise;
+}
+
+export async function evaluateExercise(exercise:{id:string;prompt:string;solution:string},answer:string,reasoning:string,config:Config) {
+  const result=await call<PracticeEvaluation>(config,'evaluate_practice',{problem:exercise.prompt,solution:exercise.solution,answer,reasoning});
+  await api.save('attempts',{id:id(),exercise_id:exercise.id,answer,reasoning,evaluation:JSON.stringify(result),created_at:now()});
+  return result;
+}
+
+export function activeGoal(snap:Snapshot,goalId:string|null) { return goalId===''?undefined:snap.learning_goals.find(g=>g.id===goalId)??snap.learning_goals.at(-1); }
