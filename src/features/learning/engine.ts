@@ -19,6 +19,15 @@ export function parseStringList(value:string):string[] {
   } catch { return []; }
 }
 
+function savedProbeEvaluation(step:Snapshot['workflow_executions'][number]|undefined,answers:{question:string;answer:string;reasoning:string}[]):AgentResult<Evaluation>|null {
+  if(step?.status!=='completed'||step.input!==JSON.stringify({answers})||!step.output) return null;
+  try {
+    const value:unknown=JSON.parse(step.output);
+    if(!value||typeof value!=='object'||!('summary' in value)||typeof value.summary!=='string'||!('startingPoint' in value)||typeof value.startingPoint!=='string'||!('observations' in value)||!Array.isArray(value.observations)) return null;
+    return value as AgentResult<Evaluation>;
+  } catch { return null; }
+}
+
 export function orderCurriculumTopics<T extends {id:string;prerequisites:string[]}>(topics:T[]):T[] {
   const ids=new Set(topics.map(topic=>topic.id));
   if(ids.size!==topics.length) throw new Error('Учебный план содержит повторяющиеся ID тем');
@@ -104,12 +113,14 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
   }
   const probeStep=snap.workflow_executions.find(item=>item.id===`${goalId}:probe`);
   await workflow(goalId,'probe','completed',{answers},probeStep?.output?JSON.parse(probeStep.output):{answered:answers.length});
-  await workflow(goalId,'evaluation','running',{answers});
-  let evaluation:AgentResult<Evaluation>;
-  try { evaluation=await call<Evaluation>(config,'evaluate_probe',{goal:goal.title,answers},sessionId); }
-  catch(e) { await workflow(goalId,'evaluation',String(e).includes('отменён')?'cancelled':'failed',{answers},null,String(e)); throw e; }
-  await workflow(goalId,'evaluation','completed',{answers},evaluation);
-  await message(sessionId,'assistant',evaluation.summary,'probe-evaluation');
+  let evaluation=savedProbeEvaluation(snap.workflow_executions.find(item=>item.id===`${goalId}:evaluation`),answers);
+  if(!evaluation) {
+    await workflow(goalId,'evaluation','running',{answers});
+    try { evaluation=await call<Evaluation>(config,'evaluate_probe',{goal:goal.title,answers},sessionId); }
+    catch(e) { await workflow(goalId,'evaluation',String(e).includes('отменён')?'cancelled':'failed',{answers},null,String(e)); throw e; }
+    await workflow(goalId,'evaluation','completed',{answers},evaluation);
+  }
+  if(!snap.messages.some(item=>item.session_id===sessionId&&item.kind==='probe-evaluation'&&item.content===evaluation.summary)) await message(sessionId,'assistant',evaluation.summary,'probe-evaluation');
   await workflow(goalId,'curriculum','running',{evaluation});
   let curriculum:AgentResult<Curriculum>;
   try {

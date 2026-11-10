@@ -77,6 +77,23 @@ describe('learning workflow recovery', () => {
     expect(fake.save).toHaveBeenCalledWith('workflow_executions',expect.objectContaining({step_id:'curriculum',status:'failed'}));
   });
 
+  it('reuses a completed evaluation for unchanged answers after a curriculum interruption', async () => {
+    const snapshot=await fake.snapshot();
+    const answers=[{question:'Вопрос 1',answer:'Ответ 1',reasoning:'Мысль 1'}];
+    snapshot.workflow_executions.push({id:'goal:evaluation',status:'completed',input:JSON.stringify({answers}),output:JSON.stringify({summary:'Сохранённая оценка',observations:[],startingPoint:'Начало',_execution:{durationMs:1}})} as Snapshot['workflow_executions'][number]);
+    snapshot.messages.push({id:'evaluation-message',session_id:'session',kind:'probe-evaluation',role:'assistant',content:'Сохранённая оценка',created_at:'2026-01-01'});
+    await finishProbe('goal','session',answers,{provider:'codex',model:'default'});
+    expect(fake.agent.mock.calls.map(([operation])=>operation)).toEqual(['curriculum']);
+    expect(fake.save.mock.calls.filter(([table,record])=>table==='messages'&&record.kind==='probe-evaluation')).toHaveLength(0);
+  });
+
+  it('re-evaluates when the learner changes an answer', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:evaluation',status:'completed',input:JSON.stringify({answers:[{question:'Вопрос 1',answer:'Старый ответ',reasoning:'Мысль 1'}]}),output:JSON.stringify({summary:'Устаревшая оценка',observations:[],startingPoint:'Начало'})} as Snapshot['workflow_executions'][number]);
+    await finishProbe('goal','session',[{question:'Вопрос 1',answer:'Новый ответ',reasoning:'Мысль 1'}],{provider:'codex',model:'default'});
+    expect(fake.agent.mock.calls.map(([operation])=>operation)).toEqual(['evaluate_probe','curriculum']);
+  });
+
   it('starts another learning session only after the curriculum is complete', async () => {
     const snapshot=await fake.snapshot();
     snapshot.workflow_executions.push({id:'goal:curriculum',status:'running'});
