@@ -132,4 +132,13 @@ describe('learning workflow recovery', () => {
     const input=fake.agent.mock.calls.find(([operation])=>operation==='practice')?.[3];
     expect(input.attempts.map((item:{answer:string})=>item.answer)).toEqual(['Нужный ответ']);
   });
+
+  it('uses the retrieval skill for cards unless the learner selected a custom skill', async () => {
+    fake.agent.mockResolvedValue({kind:'short_answer',prompt:'Вспомните указатели',solution:'Адрес',topicId:'topic',_execution:{durationMs:1}});
+    const topic={id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'Адреса памяти',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0};
+    await generateExercise('goal',topic,{provider:'codex',model:'default'},'retrieval_card');
+    expect(fake.agent.mock.calls.at(-1)?.[4]).toBe('retrieval-review');
+    await generateExercise('goal',topic,{provider:'codex',model:'default',skillOverrides:{practice:'exercise-generator'}},'retrieval_card');
+    expect(fake.agent.mock.calls.at(-1)?.[4]).toBe('exercise-generator');
+  });
 });

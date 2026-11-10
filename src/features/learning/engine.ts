@@ -190,7 +190,9 @@ export async function generateExercise(goalId:string,topic:Topic,config:Config,f
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
   const topicExerciseIds=new Set(snap.exercises.filter(item=>item.goal_id===goalId&&item.topic_id===topic.id).map(item=>item.id));
   const attempts=snap.attempts.filter(item=>topicExerciseIds.has(item.exercise_id)).slice(-8).map(item=>({answer:item.answer,evaluation:item.evaluation}));
-  const result=await call<Practice>(config,'practice',{goal:goal.title,topic,attempts,format});
+  const selectedConfig=format==='retrieval_card'&&!config.skillOverrides?.practice
+    ? {...config,skillOverrides:{...config.skillOverrides,practice:'retrieval-review'}} : config;
+  const result=await call<Practice>(selectedConfig,'practice',{goal:goal.title,topic,attempts,format});
   const exercise={id:id(),goal_id:goalId,topic_id:topic.id,kind:result.kind,prompt:result.prompt,solution:result.solution,created_at:now()};
   await api.save('exercises',exercise); return exercise;
 }
