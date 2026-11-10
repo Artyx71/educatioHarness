@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, io::Write, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
+use std::{collections::HashMap, io::{Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tauri::{Manager, State};
 
 struct AppState { db: Mutex<Connection>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> }
@@ -168,21 +168,31 @@ struct AgentRequest { request_id: String, operation: String, provider: String, m
 
 fn wait_for_agent(mut child: Child, cancelled: &AtomicBool, timeout: Duration) -> Result<Output, String> {
     let started = Instant::now();
-    loop {
+    let mut stdout = child.stdout.take().ok_or("Missing runtime stdout")?;
+    let mut stderr = child.stderr.take().ok_or("Missing runtime stderr")?;
+    let stdout_reader = std::thread::spawn(move || { let mut data = Vec::new(); stdout.read_to_end(&mut data).map(|_| data) });
+    let stderr_reader = std::thread::spawn(move || { let mut data = Vec::new(); stderr.read_to_end(&mut data).map(|_| data) });
+    let status = loop {
         if cancelled.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Err("Запрос отменён".into());
         }
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() { break; }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? { break status; }
         if started.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Err("Время ожидания ответа ИИ истекло".into());
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
-    child.wait_with_output().map_err(|e| e.to_string())
+    };
+    let stdout = stdout_reader.join().map_err(|_|"Runtime stdout reader failed")?.map_err(|e|e.to_string())?;
+    let stderr = stderr_reader.join().map_err(|_|"Runtime stderr reader failed")?.map_err(|e|e.to_string())?;
+    Ok(Output { status, stdout, stderr })
 }
 
 #[tauri::command]
@@ -274,11 +284,18 @@ mod tests {
     }
     #[test]
     fn cancellation_stops_child_process() {
-        let child = Command::new("sleep").arg("5").stdout(Stdio::piped()).spawn().unwrap();
+        let child = Command::new("sleep").arg("5").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let cancelled = AtomicBool::new(true);
         let started = Instant::now();
         let result = wait_for_agent(child, &cancelled, Duration::from_secs(1));
         assert!(result.unwrap_err().contains("отменён"));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    #[test]
+    fn large_runtime_output_does_not_block() {
+        let child = Command::new("head").args(["-c", "131072", "/dev/zero"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let output = wait_for_agent(child, &AtomicBool::new(false), Duration::from_secs(3)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 131072);
     }
 }
