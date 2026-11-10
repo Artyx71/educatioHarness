@@ -1,4 +1,5 @@
 import { api, id, now } from '../../lib/api';
+import { transitionWorkflow, type WorkflowStatus } from '../../lib/workflow';
 import type { AgentResult, Operation, Provider, Snapshot, Topic } from '../../lib/types';
 
 export type Config = { provider:Provider; model:string; skillOverrides?:Record<string,string> };
@@ -54,10 +55,12 @@ async function call<T>(config:Config,operation:Operation,input:unknown,sessionId
   }
 }
 
-async function workflow(goalId:string,stepId:string,status:string,input:unknown,output:unknown=null,error='') {
-  const previous=(await api.snapshot()).workflow_executions.find(w=>w.id===`${goalId}:${stepId}`);
-  const retryCount=Number(previous?.retry_count??0)+(status==='running'&&previous?1:0);
-  await api.save('workflow_executions',{id:`${goalId}:${stepId}`,goal_id:goalId,status,step_id:stepId,input:JSON.stringify(input),output:output===null?'':JSON.stringify(output),error,retry_count:String(retryCount),updated_at:now()});
+async function workflow(goalId:string,stepId:string,status:WorkflowStatus,input:unknown,output:unknown=null,error='',sessionId?:string) {
+  const prerequisite=stepId==='evaluation'?'probe':stepId==='curriculum'?'evaluation':stepId==='teach'?'curriculum':null;
+  await transitionWorkflow({goalId,stepId,status,input,output,error,sessionId,
+    instanceId:stepId==='teach'?sessionId:undefined,
+    dependencies:prerequisite?[`${goalId}:${prerequisite}`]:[],metadata:{workflow:'learning'},
+  });
 }
 
 async function message(sessionId:string,role:'user'|'assistant',content:string,kind='text') {
@@ -152,13 +155,13 @@ export async function teach(goalId:string,sessionId:string,topic:Topic,config:Co
   const sessionIds=new Set(snap.sessions.filter(item=>item.goal_id===goalId).map(item=>item.id));
   const history=snap.messages.filter(item=>sessionIds.has(item.session_id)).sort((a,b)=>a.created_at.localeCompare(b.created_at)).slice(-24).map(item=>({role:item.role,content:item.content,kind:item.kind}));
   const recordedClaims=snap.knowledge_nodes.filter(item=>item.goal_id===goalId&&item.kind==='proposition').slice(-20).map(item=>item.statement);
-  await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''});
+  await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''},null,'',sessionId);
   let result:AgentResult<Teaching>;
   try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:parseStringList(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId); }
-  catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e)); throw e; }
+  catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e),sessionId); throw e; }
   const text=`${result.message}\n\n**${result.questionType==='predict'?'Предположите':'Проверьте понимание'}:** ${result.question}`;
   const created=await message(sessionId,'assistant',text,'teaching');
-  await workflow(goalId,'teach','waiting_for_user',{topicId:topic.id,answer:answer??''},result);
+  await workflow(goalId,'teach','waiting_for_user',{topicId:topic.id,answer:answer??''},result,'',sessionId);
   await api.save('topics',{...topic,status:'in_progress',position:String(topic.position)});
   const session=snap.sessions.find(item=>item.id===sessionId);
   if(session) await api.save('sessions',{...session,updated_at:now()});

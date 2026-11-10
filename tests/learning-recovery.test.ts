@@ -31,7 +31,13 @@ describe('learning workflow recovery', () => {
       preferences: [],
     } as unknown as Snapshot;
     fake.snapshot.mockResolvedValue(snapshot);
-    fake.save.mockResolvedValue(undefined);
+    fake.save.mockImplementation(async (table:string,record:{id?:string})=>{
+      if(table==='workflow_executions') {
+        const index=snapshot.workflow_executions.findIndex(item=>item.id===record.id);
+        if(index>=0) snapshot.workflow_executions[index]=record as Snapshot['workflow_executions'][number];
+        else snapshot.workflow_executions.push(record as Snapshot['workflow_executions'][number]);
+      }
+    });
     fake.remove.mockResolvedValue(undefined);
     fake.agent.mockImplementation(async (operation: string) => {
       if (operation === 'evaluate_probe') return { summary: 'Оценка', observations: [], startingPoint: 'Начало', _execution: { durationMs: 1 } };
@@ -42,7 +48,8 @@ describe('learning workflow recovery', () => {
 
   it('saves only missing answers and replaces an interrupted curriculum', async () => {
     const actions: string[] = [];
-    fake.save.mockImplementation(async (table: string) => { actions.push(`save:${table}`); });
+    const persist=fake.save.getMockImplementation()!;
+    fake.save.mockImplementation(async (table: string, record:unknown) => { actions.push(`save:${table}`);await persist(table,record); });
     fake.remove.mockImplementation(async (table: string, id: string) => { actions.push(`remove:${table}:${id}`); });
 
     await finishProbe('goal', 'session', [
@@ -82,6 +89,7 @@ describe('learning workflow recovery', () => {
 
   it('keeps teacher context inside one goal across sessions', async () => {
     const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:curriculum',status:'completed'} as Snapshot['workflow_executions'][number]);
     snapshot.sessions.push({id:'previous',goal_id:'goal'},{id:'other',goal_id:'another-goal'});
     snapshot.messages.push(
       {id:'a',session_id:'previous',role:'user',content:'Я понимаю адреса',kind:'teaching-answer',created_at:'2026-01-02'},
@@ -102,6 +110,7 @@ describe('learning workflow recovery', () => {
 
   it('links an audited shared proposition to the current topic', async () => {
     const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:curriculum',status:'completed'} as Snapshot['workflow_executions'][number]);
     snapshot.knowledge_nodes.push({id:'existing',goal_id:'goal',kind:'proposition',name:'Адрес',statement:'Указатель хранит адрес'});
     fake.agent.mockImplementation(async (operation:string) => {
       if(operation==='teach') return {message:'Указатель хранит адрес.',question:'Что это означает?',questionType:'check',topicId:'topic',phase:'teach',_execution:{durationMs:1}};
