@@ -738,7 +738,45 @@ fn save_record(state: State<AppState>, table: String, record: Value) -> Result<(
     save_record_db(&db,&table,record)
 }
 
+fn validate_preference(record: &Value) -> Result<(), String> {
+    let key = record.get("key").and_then(Value::as_str).ok_or("Invalid preference key")?;
+    let value = record.get("value").and_then(Value::as_str).ok_or("Invalid preference value")?;
+    if value.len() > 4096 { return Err("Preference is too large".into()); }
+    match key {
+        "provider" if ["codex", "openai", "server"].contains(&value) => Ok(()),
+        "model" if !value.is_empty() && value.len() <= 100 && value.bytes().all(|b| b.is_ascii_alphanumeric() || [b'.', b'_', b'-'].contains(&b)) => Ok(()),
+        "profile_name" if !value.trim().is_empty() && value.chars().count() <= 80 => Ok(()),
+        "skill_overrides" => {
+            let parsed: Value = serde_json::from_str(value).map_err(|_|"Invalid skill overrides")?;
+            let entries = parsed.as_object().ok_or("Invalid skill overrides")?;
+            if entries.len() > 8 { return Err("Too many skill overrides".into()); }
+            for (operation, skill) in entries {
+                if !["probe","evaluate_probe","curriculum","teach","practice","evaluate_practice","extract","audit"].contains(&operation.as_str()) {
+                    return Err("Invalid skill operation".into());
+                }
+                let name = skill.as_str().ok_or("Invalid skill name")?;
+                if name.is_empty() || name.len() > 61 || !name.starts_with(|c:char|c.is_ascii_lowercase())
+                    || !name.bytes().all(|b|b.is_ascii_lowercase()||b.is_ascii_digit()||b==b'-') {
+                    return Err("Invalid skill name".into());
+                }
+            }
+            Ok(())
+        },
+        _ if key.starts_with("thread:") => {
+            let parts: Vec<&str> = key.split(':').collect();
+            if parts.len() != 4 || !["codex","openai","server"].contains(&parts[1])
+                || uuid::Uuid::parse_str(parts[2]).is_err()
+                || !["probe","evaluate_probe","curriculum","teach","practice","evaluate_practice","extract","audit","validate"].contains(&parts[3])
+                || value.is_empty() || value.len() > 256 { return Err("Invalid thread preference".into()); }
+            Ok(())
+        },
+        _ => Err("Preference requires a dedicated command".into()),
+    }
+}
+
 fn save_record_db(db: &Connection, table: &str, record: Value) -> Result<(), String> {
+    if record.to_string().len() > 2_000_000 { return Err("Record is too large".into()); }
+    if table == "preferences" { validate_preference(&record)?; }
     let allowed: &[(&str, &[&str])] = &[
         ("learning_goals", &["id","title","created_at","updated_at"]),
         ("sessions", &["id","goal_id","phase","title","created_at","updated_at"]),
@@ -1251,6 +1289,22 @@ mod tests {
         assert_eq!(session,"s");
         assert_eq!(deps,"[\"g:curriculum\"]");
         assert_eq!(meta,"{\"workflow\":\"learning\"}");
+    }
+    #[test]
+    fn general_record_write_cannot_bypass_sensitive_preference_commands() {
+        let conn=Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        for key in ["sync_server_url","sync_last_etag","skill_directories","unknown"] {
+            assert!(save_record_db(&conn,"preferences",json!({"key":key,"value":"https://other.example"})).is_err());
+        }
+        save_record_db(&conn,"preferences",json!({"key":"provider","value":"codex"})).unwrap();
+        save_record_db(&conn,"preferences",json!({"key":"model","value":"gpt-6.1-sol"})).unwrap();
+        save_record_db(&conn,"preferences",json!({"key":"skill_overrides","value":"{\"teach\":\"my-socratic-skill\"}"})).unwrap();
+        let thread_key="thread:codex:550e8400-e29b-41d4-a716-446655440000:teach";
+        save_record_db(&conn,"preferences",json!({"key":thread_key,"value":"thread-id"})).unwrap();
+        assert!(save_record_db(&conn,"preferences",json!({"key":"skill_overrides","value":"{\"teach\":\"../unsafe\"}"})).is_err());
+        let count:i64=conn.query_row("SELECT COUNT(*) FROM preferences",[],|row|row.get(0)).unwrap();
+        assert_eq!(count,4);
     }
     #[test]
     fn interrupted_curriculum_can_be_replaced_without_orphaned_topic_links() {
