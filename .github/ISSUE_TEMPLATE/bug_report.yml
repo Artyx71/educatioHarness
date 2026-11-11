@@ -1,0 +1,45 @@
+name: Ошибка
+description: Сообщить о воспроизводимой ошибке educatioHarness
+title: 'bug: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: 'Не прикладывайте API-ключи, токены, приватные учебные данные или незашифрованную базу.'
+  - type: input
+    id: version
+    attributes:
+      label: Версия или commit
+      placeholder: '0.1.0 / abc1234'
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Платформа
+      placeholder: 'Arch Linux x86_64, Windows 11, macOS 15, Android…'
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Шаги воспроизведения
+      description: 'Укажите обезличенные данные и конкретные действия.'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидалось
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Получилось
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Логи или снимки (без секретов)

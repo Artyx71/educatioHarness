@@ -1,4 +1,4 @@
-name: Desktop builds
+name: Validate and package desktop
 
 on:
   push:
@@ -6,13 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  desktop:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  quality:
+    name: TypeScript, tests and Rust (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,15 +28,44 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Linux development libraries
-        if: runner.os == 'Linux'
+      - name: Install Tauri Linux libraries
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf rpm
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  desktop:
+    name: Package (${{ matrix.os }})
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Tauri Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf rpm
+      - run: npm ci
+      - name: Cross-platform JavaScript tests
+        if: runner.os != 'Linux'
+        run: npm test
+      - name: Cross-platform Rust tests
+        if: runner.os != 'Linux'
+        run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npm run runtime:bundle
       - run: npm run runtime:smoke
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npm run desktop:build
       - name: RPM package
         if: runner.os == 'Linux'
@@ -46,3 +80,4 @@ jobs:
             src-tauri/target/release/bundle/**/*.exe
             src-tauri/target/release/bundle/**/*.dmg
           if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,29 @@
+name: Возможность
+description: Предложить улучшение обучения или платформы
+title: 'feature: '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Пользовательская проблема
+      description: 'Что сейчас не получается сделать?'
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Сценарий и желаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Как проверить результат
+      description: 'Наблюдаемые критерии приёмки и важные ошибки/краевые случаи.'
+    validations:
+      required: true
+  - type: textarea
+    id: considerations
+    attributes:
+      label: Данные, безопасность и платформы
