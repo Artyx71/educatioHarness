@@ -156,16 +156,16 @@ select:disabled{-webkit-text-fill-color:var(--field-text);background-color:var(-
 @media(max-width:800px){.topic-dashboard,.activity-dashboard,.review-prompt,.retained-goal{width:min(390px,calc(100vw - 220px))}.answer-toolbar span:last-child{display:none}}
 .mobile-nav,.mobile-plan-button,.mobile-plan-backdrop,.mobile-plan-close{display:none}
 @media(max-width:640px){
-  .app{height:100dvh;flex-direction:column;padding-top:env(safe-area-inset-top);background:#111}
+  .app{height:100dvh;flex-direction:column;padding-top:max(env(safe-area-inset-top),32px);background:#111}
   .ref-sidebar{display:none}
   .main{flex:1;min-height:0;width:100%}
   .agent-activity{bottom:13px;max-width:calc(100% - 22px)}.main:has(.learn-page) .agent-activity{bottom:145px}.main:has(.reference-home) .agent-activity{bottom:142px}
-  .mobile-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));flex:none;min-height:calc(60px + env(safe-area-inset-bottom));padding:3px 4px env(safe-area-inset-bottom);background:#171717;border-top:1px solid #363636;z-index:40}
+  .mobile-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));flex:none;min-height:calc(60px + max(env(safe-area-inset-bottom),24px));padding:3px 4px max(env(safe-area-inset-bottom),24px);background:#171717;border-top:1px solid #363636;z-index:40}
   .mobile-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:0;padding:5px 1px;border:0;border-radius:6px;background:transparent;color:#888;font-size:9px}
   .mobile-nav button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
   .mobile-nav button[aria-current="page"]{background:#292929;color:#eee}
   .page{padding:23px 16px}.page h1{font-size:25px}
-  .reference-home{height:auto;min-height:calc(100dvh - 60px - env(safe-area-inset-bottom));padding:24px 16px 158px;display:flex}
+  .reference-home{height:auto;min-height:100%;padding:24px 16px 158px;display:flex}
   .home-summary{width:100%}.home-summary h1{font-size:26px;margin-top:25px}
   .home-graph-link{display:none}
   .topic-dashboard,.activity-dashboard,.review-prompt,.retained-goal{width:min(390px,100%)}

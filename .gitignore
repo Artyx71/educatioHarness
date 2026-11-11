@@ -8,6 +8,7 @@ src-tauri/target/
 .env*
 *.db
 *.db-*
-src-tauri/gen/
+src-tauri/gen/apple/
+src-tauri/gen/schemas/
 src-tauri/binaries/
 .sync-data/
