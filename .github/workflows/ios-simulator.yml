@@ -27,3 +27,20 @@ jobs:
         run: npx tauri ios init --ci
       - name: Build unsigned Apple Silicon simulator app
         run: npx tauri ios build --debug -t aarch64-sim --ci
+      - name: Launch app in an iPhone simulator
+        run: |
+          SIMULATOR=$(xcrun simctl list devices available -j | node -e "let input='';process.stdin.on('data',chunk=>input+=chunk);process.stdin.on('end',()=>{const devices=Object.values(JSON.parse(input).devices).flat();const phone=devices.find(device=>device.name.startsWith('iPhone')&&device.state==='Shutdown');if(!phone)throw new Error('No available iPhone simulator');process.stdout.write(phone.udid)})")
+          xcrun simctl boot "$SIMULATOR"
+          xcrun simctl bootstatus "$SIMULATOR" -b
+          xcrun simctl install "$SIMULATOR" src-tauri/gen/apple/build/arm64-sim/educatioHarness.app
+          xcrun simctl launch "$SIMULATOR" dev.educatioharness.desktop
+          sleep 5
+          xcrun simctl io "$SIMULATOR" screenshot "$RUNNER_TEMP/educatio-ios-first-launch.png"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: educatioHarness-ios-simulator
+          path: |
+            src-tauri/gen/apple/build/arm64-sim/educatioHarness.app
+            ${{ runner.temp }}/educatio-ios-first-launch.png
+          if-no-files-found: error
+          retention-days: 7
