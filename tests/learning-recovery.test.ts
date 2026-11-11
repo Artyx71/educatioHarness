@@ -125,6 +125,20 @@ describe('learning workflow recovery', () => {
     expect(input.recordedClaims).toEqual(['Указатель хранит адрес']);
   });
 
+  it('does not duplicate a saved answer when retrying a failed teaching request', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:curriculum',status:'completed'} as Snapshot['workflow_executions'][number]);
+    snapshot.messages.push({id:'pending',session_id:'session',role:'user',kind:'teaching-answer',content:'Я думаю, это адрес',created_at:'2026-01-02'});
+    fake.agent.mockImplementation(async (operation:string) => {
+      if(operation==='teach') return {message:'Разберём адрес.',question:'Что хранит указатель?',questionType:'check',topicId:'topic',phase:'teach',_execution:{durationMs:1}};
+      if(operation==='extract') return {propositions:[],chains:[],_execution:{durationMs:1}};
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    await teach('goal','session',{id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0},{provider:'codex',model:'default'},'Я думаю, это адрес');
+    expect(fake.save.mock.calls.filter(([table,record])=>table==='messages'&&record.role==='user')).toHaveLength(0);
+    expect(fake.save.mock.calls.filter(([table,record])=>table==='messages'&&record.role==='assistant')).toHaveLength(1);
+  });
+
   it('links an audited shared proposition to the current topic', async () => {
     const snapshot=await fake.snapshot();
     snapshot.workflow_executions.push({id:'goal:curriculum',status:'completed'} as Snapshot['workflow_executions'][number]);

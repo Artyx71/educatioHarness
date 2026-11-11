@@ -14,4 +14,17 @@ describe('narrow learning shell',()=>{
     expect(html).toContain('Новая учебная цель');
     expect(html).not.toMatch(/>0\s*<\/section>/);
   });
+  it('does not offer to skip an unanswered teacher question',()=>{
+    const topic={id:'pointers',curriculum_id:'plan',title:'Указатели',description:'',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'in_progress',position:0};
+    const snap={
+      learning_goals:[{id:'goal',title:'Изучить C'}],sessions:[],messages:[],diagnostic_answers:[],
+      workflow_executions:[{id:'session:teach',status:'waiting_for_user',output:JSON.stringify({topicId:'pointers'})}],
+    } as unknown as Snapshot;
+    const props={snap,goalId:'goal',sessionId:'session',topics:[topic],topic,config:{provider:'codex' as const,model:'default'},busy:'',run:()=>{},onGoal:()=>{},onTopic:()=>{}};
+    const waiting=renderToStaticMarkup(createElement(Learn,props));
+    expect(waiting).toContain('Опишите ход мысли');
+    expect(waiting).not.toContain('Продолжить: Указатели');
+    snap.workflow_executions[0].status='failed';
+    expect(renderToStaticMarkup(createElement(Learn,props))).toContain('Продолжить: Указатели');
+  });
 });

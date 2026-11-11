@@ -162,7 +162,10 @@ export async function startLearningSession(goalId:string) {
 
 export async function teach(goalId:string,sessionId:string,topic:Topic,config:Config,answer?:string) {
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Goal missing');
-  if(answer) await message(sessionId,'user',answer,'teaching-answer');
+  // A failed request can leave the answer in SQLite before the model replies.
+  // Re-sending that same pending answer must not create a duplicate transcript entry.
+  const lastMessage=snap.messages.filter(item=>item.session_id===sessionId).at(-1);
+  if(answer&&!(lastMessage?.role==='user'&&lastMessage.kind==='teaching-answer'&&lastMessage.content===answer)) await message(sessionId,'user',answer,'teaching-answer');
   const sessionIds=new Set(snap.sessions.filter(item=>item.goal_id===goalId).map(item=>item.id));
   const history=snap.messages.filter(item=>sessionIds.has(item.session_id)).sort((a,b)=>a.created_at.localeCompare(b.created_at)).slice(-24).map(item=>({role:item.role,content:item.content,kind:item.kind}));
   const recordedClaims=snap.knowledge_nodes.filter(item=>item.goal_id===goalId&&item.kind==='proposition').slice(-20).map(item=>item.statement);
