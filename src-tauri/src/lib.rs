@@ -1193,7 +1193,13 @@ mod tests {
         })).unwrap();
         save_record_db(&conn,"attempts",json!({
             "id":"a","exercise_id":"e","answer":"Адрес ячейки памяти","reasoning":"",
-            "evaluation":"{}","created_at":"t"
+            "evaluation":"","created_at":"t"
+        })).unwrap();
+        let draft:String=conn.query_row("SELECT evaluation FROM attempts WHERE id='a'",[],|row|row.get(0)).unwrap();
+        assert_eq!(draft,"");
+        save_record_db(&conn,"attempts",json!({
+            "id":"a","exercise_id":"e","answer":"Адрес ячейки памяти","reasoning":"",
+            "evaluation":"{\"verdict\":\"correct\"}","created_at":"t"
         })).unwrap();
         let diagnostic:String=conn.query_row("SELECT reasoning FROM diagnostic_answers WHERE id='d'",[],|row|row.get(0)).unwrap();
         let practice:String=conn.query_row("SELECT reasoning FROM attempts WHERE id='a'",[],|row|row.get(0)).unwrap();

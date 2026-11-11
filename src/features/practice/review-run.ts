@@ -2,6 +2,7 @@ import { api, id } from '../../lib/api';
 import { transitionWorkflow } from '../../lib/workflow';
 import type { Exercise, Snapshot, Topic, WorkflowExecution } from '../../lib/types';
 import { generateExercise, type Config } from '../learning/engine';
+import { parsePracticeFeedback } from './review';
 
 type ReviewInput={topicIds:string[]};
 type ReviewOutput={exerciseIds:string[];reviewedAt?:string};
@@ -25,6 +26,7 @@ export function selectReviewTopics(topics:Topic[],exercises:Exercise[],attempts:
   const attemptCount=new Map<string,number>();
   const exerciseTopics=new Map(exercises.map(exercise=>[exercise.id,exercise.topic_id]));
   for(const attempt of attempts) {
+    if(!parsePracticeFeedback(attempt.evaluation)) continue;
     const topicId=exerciseTopics.get(attempt.exercise_id);
     if(topicId) attemptCount.set(topicId,(attemptCount.get(topicId)??0)+1);
   }
@@ -79,7 +81,7 @@ export async function finishReview(runId:string):Promise<void> {
   if(!run) throw new Error('Набор повторения не найден');
   const {input,output,runId:instanceId}=reviewState(run);
   if(run.status!=='waiting_for_user') throw new Error('Повторение ещё не готово к завершению');
-  if(output.exerciseIds.length!==input.topicIds.length||output.exerciseIds.some(exerciseId=>!snapshot.attempts.some(attempt=>attempt.exercise_id===exerciseId))) throw new Error('Сначала ответьте на все вопросы повторения');
+  if(output.exerciseIds.length!==input.topicIds.length||output.exerciseIds.some(exerciseId=>!snapshot.attempts.some(attempt=>attempt.exercise_id===exerciseId&&parsePracticeFeedback(attempt.evaluation)))) throw new Error('Сначала ответьте на все вопросы повторения');
   await transitionWorkflow({goalId:run.goal_id,instanceId,stepId:'review',status:'completed',input,output:{...output,reviewedAt:new Date().toISOString()},metadata:{workflow:'learning',kind:'mixed_review'}});
 }
 

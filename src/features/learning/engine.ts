@@ -251,11 +251,17 @@ export async function generateExercise(goalId:string,topic:Topic,config:Config,f
 
 export async function evaluateExercise(exercise:{id:string;prompt:string;solution:string},answer:string,reasoning:string,config:Config) {
   if(!answer.trim()) throw new Error('Сначала напишите ответ');
+  // Persist the learner's work before the provider call. A timeout, crash or
+  // cancellation must not turn a written answer back into an empty form.
+  const snap=await api.snapshot();
+  const previous=snap.attempts.filter(item=>item.exercise_id===exercise.id&&!item.evaluation).at(-1);
+  const draft={id:previous?.id??id(),exercise_id:exercise.id,answer,reasoning,evaluation:'',created_at:previous?.created_at??now()};
+  await api.save('attempts',draft);
   // The answer may already include an explanation. Keep that text available to
   // the evaluator without pretending the learner filled a separate field.
   const separateReasoning=reasoning.trim();
   const result=await call<PracticeEvaluation>(config,'evaluate_practice',{problem:exercise.prompt,solution:exercise.solution,answer,reasoning:separateReasoning||answer.trim(),reasoningSource:separateReasoning?'separate':'answer'});
-  await api.save('attempts',{id:id(),exercise_id:exercise.id,answer,reasoning,evaluation:JSON.stringify(result),created_at:now()});
+  await api.save('attempts',{...draft,evaluation:JSON.stringify(result)});
   return result;
 }
 

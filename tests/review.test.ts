@@ -4,7 +4,7 @@ import type { Attempt, Exercise, Topic } from '../src/lib/types';
 
 const topic = (id:string) => ({id, curriculum_id:'c', title:id, description:'', prerequisites:'[]', objectives:'[]', difficulty:'', status:'in_progress', position:0}) satisfies Topic;
 const exercise = (id:string, topicId:string) => ({id, goal_id:'g', topic_id:topicId, kind:'short_answer', prompt:'', solution:'', created_at:''}) satisfies Exercise;
-const attempt = (id:string, exerciseId:string, daysAgo:number, verdict:string):Attempt => ({id, exercise_id:exerciseId, answer:'', reasoning:'', evaluation:JSON.stringify({verdict}), created_at:new Date(Date.UTC(2026,0,10)-daysAgo*86_400_000).toISOString()});
+const attempt = (id:string, exerciseId:string, daysAgo:number, verdict:string):Attempt => ({id, exercise_id:exerciseId, answer:'', reasoning:'', evaluation:JSON.stringify({verdict,feedback:'Разбор',misconception:'',recommendation:'Повторите'}), created_at:new Date(Date.UTC(2026,0,10)-daysAgo*86_400_000).toISOString()});
 
 describe('review suggestions', () => {
   const now=Date.UTC(2026,0,10);
@@ -23,5 +23,10 @@ describe('review suggestions', () => {
   });
   it('does not infer learning state from unreadable evaluations', () => {
     expect(reviewSuggestion([topic('a')],[exercise('ea','a')],[{...attempt('a','ea',9,'correct'),evaluation:'broken'}],now)).toBeNull();
+  });
+  it('keeps the latest verified result when a newer draft has no evaluation',()=>{
+    const old=attempt('old','ea',9,'incorrect');
+    const draft={...attempt('draft','ea',0,'correct'),evaluation:''};
+    expect(reviewSuggestion([topic('a')],[exercise('ea','a')],[old,draft],now)?.reason).toBe('needs_work');
   });
 });

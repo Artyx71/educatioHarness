@@ -11,7 +11,7 @@ import { activeGoal, evaluateExercise, finishProbe, generateExercise, orderCurri
 import { SkillSettings, parseSkillOverrides } from '../features/settings/SkillSettings';
 import { Markdown } from '../components/Markdown';
 import { AnswerInput } from '../features/practice/AnswerInput';
-import { reviewSuggestion } from '../features/practice/review';
+import { parsePracticeFeedback, reviewSuggestion } from '../features/practice/review';
 import { activitySummary } from '../features/profile/activity';
 import { ProfileSettings } from '../features/profile/ProfileSettings';
 import { phaseLabel, exerciseLabel, verdictLabel } from '../lib/i18n';
@@ -175,13 +175,34 @@ function TopicEditor({topic,topics,busy,run,onRemoved}:{topic:Topic;topics:Topic
 function PracticePage({goalId,topics,initialTopicId,snap,config,busy,run}:{goalId?:string;topics:Topic[];initialTopicId:string;snap:Snapshot;config:Config;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void}){
   const [topicId,setTopicId]=useState(initialTopicId);const [exerciseId,setExerciseId]=useState('');const [answer,setAnswer]=useState('');const [reasoning,setReasoning]=useState('');const [cardMode,setCardMode]=useState(false);
   const [reviewMode,setReviewMode]=useState(false);
-  if(reviewMode&&goalId) return <Suspense fallback={<div className="page muted">Загрузка повторения…</div>}><ReviewRun key={goalId} snap={snap} goalId={goalId} topics={topics} config={config} busy={busy} run={run} onClose={()=>setReviewMode(false)}/></Suspense>;
   const topic=topics.find(t=>t.id===topicId)??topics[0];
   const exercise:Exercise|undefined=snap.exercises.find(e=>e.id===exerciseId&&e.topic_id===topic?.id)??snap.exercises.filter(e=>e.goal_id===goalId&&e.topic_id===topic?.id).at(-1);
   const attempt=snap.attempts.filter(a=>a.exercise_id===exercise?.id).at(-1);
-  const feedback=attempt?JSON.parse(attempt.evaluation) as {verdict:string;feedback:string;misconception:string;recommendation:string}:null;
+  const feedback=attempt?parsePracticeFeedback(attempt.evaluation):null;
+  useEffect(()=>{
+    if(attempt&&!feedback) {setAnswer(attempt.answer);setReasoning(attempt.reasoning)}
+  // Do not overwrite edits while the learner is typing.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[exercise?.id,attempt?.id]);
+  if(reviewMode&&goalId) return <Suspense fallback={<div className="page muted">Загрузка повторения…</div>}><ReviewRun key={goalId} snap={snap} goalId={goalId} topics={topics} config={config} busy={busy} run={run} onClose={()=>setReviewMode(false)}/></Suspense>;
   const create=(asCard:boolean)=>run('Подготовка задания',async()=>{const next=await generateExercise(goalId!,topic,config,asCard?'retrieval_card':undefined);setExerciseId(next.id);setAnswer('');setReasoning('');setCardMode(asCard)});
-  return <div className="page practice-page"><div className="section-head"><div><span className="eyebrow">ПРАКТИКА</span><h1>Примените изученное.</h1><p>Вспомните идею без подсказки, затем проверьте ход мысли.</p></div><button className="button secondary" disabled={!!busy||!goalId||topics.filter(item=>item.status==='in_progress'||item.status==='completed').length<2} onClick={()=>setReviewMode(true)}>Итоговое повторение <ArrowRight size={15}/></button></div>{!topics.length?<div className="panel empty-state">Сначала пройдите диагностику и составьте план.</div>:<div className="practice-layout"><div className="panel"><label>Тема<select value={topic?.id??''} onChange={e=>{setTopicId(e.target.value);setExerciseId('');setAnswer('');setReasoning('');setCardMode(false)}}>{topics.map(t=><option value={t.id} key={t.id}>{t.title}</option>)}</select></label><div className="practice-create"><button className="button secondary" disabled={!!busy} onClick={()=>create(false)}><Plus size={16}/> Новое задание</button><button className="button secondary" disabled={!!busy} onClick={()=>create(true)}>Карточка памяти</button></div><p className="muted">Карточка открывает разбор только после вашего ответа. Проверка ИИ — гипотеза, а не объективный тест.</p></div><div className={`panel exercise-panel ${cardMode?'study-card':''} ${feedback?'revealed':''}`}>{exercise?<><span className="eyebrow">{cardMode?'КАРТОЧКА · ВСПОМНИТЕ САМИ':exerciseLabel[exercise.kind]??exercise.kind}</span><h2>{cardMode?'Что вы помните?':'Задание'}</h2><Markdown>{exercise.prompt}</Markdown>{feedback?<div className="feedback"><span className={`verdict ${feedback.verdict}`}>{verdictLabel[feedback.verdict]??feedback.verdict}</span><Markdown>{feedback.feedback}</Markdown>{feedback.misconception&&<p><strong>Возможное заблуждение:</strong> {feedback.misconception}</p>}<p>{feedback.recommendation}</p><details><summary>Вариант решения модели</summary><Markdown>{exercise.solution}</Markdown></details>{cardMode&&<button className="button secondary" disabled={!!busy} onClick={()=>create(true)}>Следующая карточка</button>}</div>:<><AnswerInput kind={exercise.kind} topic={topic.title} prompt={exercise.prompt} value={answer} onChange={setAnswer}/><textarea value={reasoning} onChange={e=>setReasoning(e.target.value)} placeholder="Ваш ход мысли" aria-label="Ваш ход мысли"/><button className="button primary" disabled={!answer.trim()||!!busy} onClick={()=>run('Проверка ответа',()=>evaluateExercise(exercise,answer,reasoning,config))}>Проверить ответ</button></>}</>:<div className="empty-state">Создайте задание или карточку по теме из плана.</div>}{busy&&<div className="loading"><LoaderCircle className="spin" size={18}/>{busy}…</div>}</div></div>}</div>;
+  return <div className="page practice-page">
+    <div className="section-head"><div><span className="eyebrow">ПРАКТИКА</span><h1>Примените изученное.</h1><p>Вспомните идею без подсказки, затем проверьте ход мысли.</p></div><button className="button secondary" disabled={!!busy||!goalId||topics.filter(item=>item.status==='in_progress'||item.status==='completed').length<2} onClick={()=>setReviewMode(true)}>Итоговое повторение <ArrowRight size={15}/></button></div>
+    {!topics.length?<div className="panel empty-state">Сначала пройдите диагностику и составьте план.</div>:<div className="practice-layout">
+      <div className="panel"><label>Тема<select value={topic?.id??''} onChange={e=>{setTopicId(e.target.value);setExerciseId('');setAnswer('');setReasoning('');setCardMode(false)}}>{topics.map(t=><option value={t.id} key={t.id}>{t.title}</option>)}</select></label><div className="practice-create"><button className="button secondary" disabled={!!busy} onClick={()=>create(false)}><Plus size={16}/> Новое задание</button><button className="button secondary" disabled={!!busy} onClick={()=>create(true)}>Карточка памяти</button></div><p className="muted">Карточка открывает разбор только после проверки ответа. Проверка ИИ — гипотеза, а не объективный тест.</p></div>
+      <div className={`panel exercise-panel ${cardMode?'study-card':''} ${feedback?'revealed':''}`}>
+        {exercise?<><span className="eyebrow">{cardMode?'КАРТОЧКА · ВСПОМНИТЕ САМИ':exerciseLabel[exercise.kind]??exercise.kind}</span><h2>{cardMode?'Что вы помните?':'Задание'}</h2><Markdown>{exercise.prompt}</Markdown>
+          {feedback?<div className="feedback"><span className={`verdict ${feedback.verdict}`}>{verdictLabel[feedback.verdict]??feedback.verdict}</span><Markdown>{feedback.feedback}</Markdown>{feedback.misconception&&<p><strong>Возможное заблуждение:</strong> {feedback.misconception}</p>}<p>{feedback.recommendation}</p><details><summary>Вариант решения модели</summary><Markdown>{exercise.solution}</Markdown></details>{cardMode&&<button className="button secondary" disabled={!!busy} onClick={()=>create(true)}>Следующая карточка</button>}</div>:<>
+            {attempt&&<p className="muted" role="status">Ответ сохранён. Проверка не завершилась — повторите её, когда подключение восстановится.</p>}
+            <AnswerInput kind={exercise.kind} topic={topic.title} prompt={exercise.prompt} value={answer} onChange={setAnswer}/>
+            <textarea value={reasoning} onChange={e=>setReasoning(e.target.value)} placeholder="Ваш ход мысли" aria-label="Ваш ход мысли"/>
+            <button className="button primary" disabled={!answer.trim()||!!busy} onClick={()=>run('Проверка ответа',()=>evaluateExercise(exercise,answer,reasoning,config))}>{attempt?'Повторить проверку':'Проверить ответ'}</button>
+          </>}
+        </>:<div className="empty-state">Создайте задание или карточку по теме из плана.</div>}
+        {busy&&<div className="loading"><LoaderCircle className="spin" size={18}/>{busy}…</div>}
+      </div>
+    </div>}
+  </div>;
 }
 
 function History({snap,onOpen}:{snap:Snapshot;onOpen:(id:string)=>void}){return <div className="page"><span className="eyebrow">ИСТОРИЯ</span><h1>Учебные занятия</h1><div className="panel list-panel">{snap.sessions.length?snap.sessions.slice().reverse().map(s=><button className="history-row" key={s.id} onClick={()=>onOpen(s.id)}><div><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)} · {snap.messages.filter(m=>m.session_id===s.id).length} сообщений</small></div><ArrowRight size={16}/></button>):<p className="muted">Занятий пока нет.</p>}</div></div>}

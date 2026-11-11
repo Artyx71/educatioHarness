@@ -7,6 +7,7 @@ vi.mock('../src/features/learning/engine',()=>({generateExercise:fake.generateEx
 import { finishReview, latestReviewRun, resumeReview, selectReviewTopics, startReview } from '../src/features/practice/review-run';
 
 const topic=(id:string,position:number,status='completed'):Topic=>({id,curriculum_id:'curriculum',title:id,description:'',prerequisites:'[]',objectives:'[]',difficulty:'beginner',status,position});
+const evaluated=JSON.stringify({verdict:'correct',feedback:'Верно',misconception:'',recommendation:'Повторите'});
 
 describe('persistent mixed-topic review',()=>{
   let snapshot:Snapshot;
@@ -33,7 +34,7 @@ describe('persistent mixed-topic review',()=>{
 
   it('selects distinct studied topics with fewer previous attempts',()=>{
     snapshot.exercises.push({id:'old',goal_id:'goal',topic_id:'a',kind:'short_answer',prompt:'',solution:'',created_at:'t'});
-    snapshot.attempts.push({id:'attempt',exercise_id:'old',answer:'',reasoning:'',evaluation:'{}',created_at:'t'});
+    snapshot.attempts.push({id:'attempt',exercise_id:'old',answer:'',reasoning:'',evaluation:evaluated,created_at:'t'});
     expect(selectReviewTopics(snapshot.topics,snapshot.exercises,snapshot.attempts).map(item=>item.id)).toEqual(['b','c','a']);
     expect(()=>selectReviewTopics([topic('a',0)],[],[])).toThrow('хотя бы две темы');
   });
@@ -47,7 +48,9 @@ describe('persistent mixed-topic review',()=>{
     expect(JSON.parse(run!.output).exerciseIds).toEqual(['exercise-a','exercise-b','exercise-c']);
     expect(fake.generateExercise.mock.calls.map(([,selected,,format])=>[selected.id,format])).toEqual([['a','retrieval_card'],['b','retrieval_card'],['c','retrieval_card']]);
     await expect(finishReview(runId)).rejects.toThrow('Сначала ответьте');
-    for(const exercise of snapshot.exercises) snapshot.attempts.push({id:`attempt-${exercise.id}`,exercise_id:exercise.id,answer:'мой ответ',reasoning:'',evaluation:'{}',created_at:'t'});
+    snapshot.attempts.push({id:'draft',exercise_id:snapshot.exercises[0].id,answer:'мой ответ',reasoning:'',evaluation:'',created_at:'t'});
+    await expect(finishReview(runId)).rejects.toThrow('Сначала ответьте');
+    for(const exercise of snapshot.exercises) snapshot.attempts.push({id:`attempt-${exercise.id}`,exercise_id:exercise.id,answer:'мой ответ',reasoning:'',evaluation:evaluated,created_at:'t'});
     await finishReview(runId);
     expect(latestReviewRun(snapshot,'goal')?.status).toBe('completed');
   });

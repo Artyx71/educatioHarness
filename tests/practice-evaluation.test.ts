@@ -10,7 +10,7 @@ const config={provider:'codex' as const,model:'default'};
 describe('practice evaluation input',()=>{
   beforeEach(()=>{
     vi.clearAllMocks();
-    fake.snapshot.mockResolvedValue({preferences:[]});
+    fake.snapshot.mockResolvedValue({preferences:[],attempts:[]});
     fake.agent.mockResolvedValue({verdict:'correct',feedback:'Верно',misconception:'',recommendation:'Повторите позже',_execution:{durationMs:1}});
     fake.save.mockResolvedValue(undefined);
   });
@@ -29,5 +29,22 @@ describe('practice evaluation input',()=>{
   it('does not call the model for an empty answer',async()=>{
     await expect(evaluateExercise(exercise,'  ','',config)).rejects.toThrow('Сначала напишите ответ');
     expect(fake.agent).not.toHaveBeenCalled();
+  });
+  it('persists a draft before model failure and completes the same attempt on retry',async()=>{
+    const snapshot={preferences:[],attempts:[] as {id:string;exercise_id:string;answer:string;reasoning:string;evaluation:string;created_at:string}[]};
+    fake.snapshot.mockImplementation(async()=>snapshot);
+    fake.save.mockImplementation(async(table:string,record:typeof snapshot.attempts[number])=>{
+      if(table==='attempts') {
+        const index=snapshot.attempts.findIndex(item=>item.id===record.id);
+        if(index<0) snapshot.attempts.push(record); else snapshot.attempts[index]=record;
+      }
+    });
+    fake.agent.mockRejectedValueOnce(new Error('Сеть недоступна'));
+    await expect(evaluateExercise(exercise,'Компоновщик не нашёл функцию','Проверил объектные файлы',config)).rejects.toThrow('Сеть недоступна');
+    expect(snapshot.attempts).toHaveLength(1);
+    expect(snapshot.attempts[0]).toMatchObject({answer:'Компоновщик не нашёл функцию',reasoning:'Проверил объектные файлы',evaluation:''});
+    await evaluateExercise(exercise,'Компоновщик не нашёл функцию','Проверил объектные файлы',config);
+    expect(snapshot.attempts).toHaveLength(1);
+    expect(JSON.parse(snapshot.attempts[0].evaluation).verdict).toBe('correct');
   });
 });
