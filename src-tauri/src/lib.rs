@@ -229,7 +229,7 @@ fn copy_database_to_directory(
         std::fs::write(config_path, config).map_err(|e| e.to_string())?;
         Ok(destination)
     })();
-    let _ = std::fs::remove_file(&temporary);
+    let _ = remove_temporary_database(&temporary);
     result
 }
 
@@ -291,6 +291,21 @@ fn create_private_file(path: &std::path::Path) -> Result<std::fs::File, String> 
     options.open(path).map_err(|e| e.to_string())
 }
 
+fn remove_temporary_database(path: &std::path::Path) -> Result<(), String> {
+    // SQLite can leave WAL/SHM companions after inspecting a temporary DB.
+    for suffix in ["", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let candidate = PathBuf::from(name);
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Не удалось удалить временный файл {}: {error}", candidate.display())),
+        }
+    }
+    Ok(())
+}
+
 fn copy_to_new_private_file(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
     let mut output = create_private_file(destination)?;
     let result = (|| {
@@ -324,7 +339,7 @@ fn decrypted_backup_bytes_at(directory:&std::path::Path, archive:&[u8], password
         Ok(temporary.clone())
     })();
     plaintext.zeroize();
-    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    if result.is_err() { let _ = remove_temporary_database(&temporary); }
     result
 }
 
@@ -376,7 +391,7 @@ fn export_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
         copy_to_new_private_file(&temporary,&destination)?;
         Ok(info)
     })();
-    let _ = std::fs::remove_file(&temporary);
+    let _ = remove_temporary_database(&temporary);
     result
 }
 
@@ -414,7 +429,7 @@ fn encrypted_database_from_connection(source:&Connection,directory:&std::path::P
         let encrypted = encrypted_result?;
         Ok((encrypted,info))
     })();
-    let _ = std::fs::remove_file(&temporary);
+    let _ = remove_temporary_database(&temporary);
     result
 }
 
@@ -423,7 +438,7 @@ fn inspect_portable_backup(app: tauri::AppHandle, path: String, password: String
     let source = portable_backup_path(&path, true)?;
     let temporary = decrypted_backup_file(&app, &source, &password)?;
     let result = inspect_backup_file(&temporary);
-    let _ = std::fs::remove_file(temporary);
+    let _ = remove_temporary_database(&temporary);
     result
 }
 
@@ -433,7 +448,7 @@ fn import_portable_backup(app: tauri::AppHandle, state: State<AppState>, path: S
     let source = portable_backup_path(&path, true)?;
     let temporary = decrypted_backup_file(&app, &source, &password)?;
     let result = import_backup_file(&state, &temporary, &app_dir(&app)?);
-    let _ = std::fs::remove_file(temporary);
+    let _ = remove_temporary_database(&temporary);
     result
 }
 
@@ -473,9 +488,18 @@ fn clear_sync_token(state:&AppState) -> Result<(),String> {
 }
 
 #[tauri::command]
-async fn sync_configure(app: tauri::AppHandle, url: String, token: String) -> Result<sync_client::RemoteStatus,String> {
+async fn sync_configure(app: tauri::AppHandle, url: String, token: String, model: String) -> Result<sync_client::RemoteStatus,String> {
+    let checked=tauri::async_runtime::spawn_blocking({
+        let url=url.clone();
+        let token=token.clone();
+        move || sync_client::status(&url,&token)
+    }).await.map_err(|e|e.to_string())??;
+    #[cfg(mobile)]
+    tokio::time::timeout(Duration::from_secs(90),sync_client::validate_agent_connection(&url,&token,&model))
+        .await.map_err(|_|"Проверка модели ИИ заняла более 90 секунд. Проверьте сервер и повторите подключение".to_string())??;
+    #[cfg(not(mobile))]
+    let _=model;
     tauri::async_runtime::spawn_blocking(move || {
-        let checked=sync_client::status(&url,&token)?;
         let state=app.state::<AppState>();
         store_sync_token(&state,&token)?;
         let mut db=state.db.lock().map_err(|e|e.to_string())?;
@@ -483,8 +507,9 @@ async fn sync_configure(app: tauri::AppHandle, url: String, token: String) -> Re
         transaction.execute("DELETE FROM preferences WHERE key='sync_last_etag'",[]).map_err(|e|e.to_string())?;
         transaction.execute("INSERT INTO preferences(key,value) VALUES('sync_server_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![url]).map_err(|e|e.to_string())?;
         transaction.commit().map_err(|e|e.to_string())?;
-        Ok(checked)
-    }).await.map_err(|e|e.to_string())?
+        Ok::<(),String>(())
+    }).await.map_err(|e|e.to_string())??;
+    Ok(checked)
 }
 
 #[tauri::command]
@@ -507,7 +532,7 @@ async fn sync_upload(app: tauri::AppHandle, path: String, password: String) -> R
     tauri::async_runtime::spawn_blocking(move || {
         let archive_path=portable_backup_path(&path,true)?;
         let decrypted=decrypted_backup_file(&app,&archive_path,&password)?;
-        std::fs::remove_file(decrypted).map_err(|e|format!("Не удалось удалить временную расшифрованную копию: {e}"))?;
+        remove_temporary_database(&decrypted)?;
         let archive=std::fs::read(&archive_path).map_err(|e|e.to_string())?;
         let state=app.state::<AppState>();
         let (url,token)=sync_credentials(&state)?;
@@ -566,7 +591,7 @@ async fn sync_import_current(app:tauri::AppHandle,password:String) -> Result<Bac
 fn import_encrypted_database(state:&AppState,directory:&std::path::Path,archive:&[u8],password:&str) -> Result<BackupInfo,String> {
     let temporary=decrypted_backup_bytes_at(directory,archive,password)?;
     let result=import_backup_file(state,&temporary,directory);
-    let _=std::fs::remove_file(&temporary);
+    let _=remove_temporary_database(&temporary);
     result
 }
 
@@ -613,7 +638,7 @@ fn import_backup_file(state: &AppState, source_path: &std::path::Path, safety_di
         }
         Ok(info)
     })();
-    let _ = std::fs::remove_file(&staged_path);
+    let _ = remove_temporary_database(&staged_path);
     result
 }
 
@@ -1572,12 +1597,45 @@ mod tests {
         source.execute("INSERT INTO learning_goals VALUES ('goal','Изучить C','now','now')",[]).unwrap();
         let (archive,info)=encrypted_database_from_connection(&source,&root,"long secret phrase").unwrap();
         assert_eq!(info.goals,1);
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".export-")));
         assert!(archive.starts_with(b"EDUHBA01"));
         assert!(portable_backup::decrypt(&archive,"wrong secret phrase").is_err());
         let restored=root.join("restored.sqlite3");
         std::fs::write(&restored,portable_backup::decrypt(&archive,"long secret phrase").unwrap()).unwrap();
         assert_eq!(inspect_backup_file(&restored).unwrap().goals,1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    #[ignore = "manual desktop-to-Android transfer; set EDUCATIO_TRANSFER_FIXTURE_DIR to an empty test directory"]
+    fn write_desktop_to_android_transfer_fixture() {
+        let root=PathBuf::from(std::env::var("EDUCATIO_TRANSFER_FIXTURE_DIR").expect("set EDUCATIO_TRANSFER_FIXTURE_DIR"));
+        assert!(root.is_dir(),"fixture directory must already exist");
+        let source=Connection::open_in_memory().unwrap();
+        migrate(&source).unwrap();
+        source.execute_batch(r#"
+            INSERT INTO learning_goals VALUES ('transfer-desktop-goal','Тест переноса: основы C','2026-11-11T00:00:00Z','2026-11-11T00:00:00Z');
+            INSERT INTO sessions VALUES ('transfer-desktop-session','transfer-desktop-goal','teaching','Указатели и адреса','2026-11-11T00:00:00Z','2026-11-11T00:00:00Z');
+            INSERT INTO messages VALUES ('transfer-desktop-message','transfer-desktop-session','user','Адрес переменной можно сохранить в указателе.','lesson','2026-11-11T00:00:00Z');
+            INSERT INTO curricula VALUES ('transfer-desktop-curriculum','transfer-desktop-goal','2026-11-11T00:00:00Z','2026-11-11T00:00:00Z');
+            INSERT INTO topics VALUES ('transfer-desktop-topic','transfer-desktop-curriculum','Адреса и указатели','Понимать адрес переменной','[]','["Объяснить оператор &"]','beginner','in_progress',0);
+            INSERT INTO exercises VALUES ('transfer-desktop-exercise','transfer-desktop-goal','transfer-desktop-topic','conceptual','Что хранит указатель?','Адрес объекта','2026-11-11T00:00:00Z');
+            INSERT INTO attempts VALUES ('transfer-desktop-attempt','transfer-desktop-exercise','Адрес объекта','Указатель содержит адрес','{"verdict":"correct","feedback":"Верно","misconception":"","recommendation":""}','2026-11-11T00:00:00Z');
+            INSERT INTO knowledge_nodes VALUES ('transfer-desktop-concept','transfer-desktop-goal','concept','Указатель','Типизированная переменная, содержащая адрес','transfer-desktop-session','transfer-desktop-message','2026-11-11T00:00:00Z');
+            INSERT INTO knowledge_nodes VALUES ('transfer-desktop-proposition','transfer-desktop-goal','proposition','Адрес объекта','Указатель может хранить адрес объекта','transfer-desktop-session','transfer-desktop-message','2026-11-11T00:00:00Z');
+            INSERT INTO knowledge_edges VALUES ('transfer-desktop-edge','transfer-desktop-goal','["transfer-desktop-concept"]','transfer-desktop-proposition','transfer-desktop-session','2026-11-11T00:00:00Z');
+            INSERT INTO knowledge_topic_links VALUES ('transfer-desktop-concept','transfer-desktop-topic');
+            INSERT INTO knowledge_provenance VALUES ('transfer-desktop-source','transfer-desktop-proposition','transfer-desktop-session','transfer-desktop-message','2026-11-11T00:00:00Z');
+            INSERT INTO preferences VALUES ('provider','codex');
+            INSERT INTO preferences VALUES ('model','gpt-6.1-sol');
+            INSERT INTO preferences VALUES ('sync_server_url','https://desktop.invalid');
+        "#).unwrap();
+        let (archive,info)=encrypted_database_from_connection(&source,&root,"educatio-fixture-pass-2026").unwrap();
+        assert_eq!((info.goals,info.sessions,info.attempts,info.version),(1,1,1,5));
+        let destination=root.join("desktop-to-android.ehb");
+        let mut file=create_private_file(&destination).unwrap();
+        file.write_all(&archive).unwrap();
+        file.sync_all().unwrap();
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".export-")));
     }
     #[test]
     fn server_archive_import_replaces_data_only_after_validation_and_saves_backup() {
@@ -1593,6 +1651,7 @@ mod tests {
         target.execute("INSERT INTO preferences VALUES ('sync_server_url','https://local.example/')",[]).unwrap();
         let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None),#[cfg(mobile)] sync_token:Mutex::new(None)};
         assert!(import_encrypted_database(&state,&root,&archive,"wrong secret phrase").is_err());
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".import-")));
         assert_eq!(state.db.lock().unwrap().query_row("SELECT title FROM learning_goals WHERE id='old'",[],|r|r.get::<_,String>(0)).unwrap(),"Старая цель");
         assert_eq!(import_encrypted_database(&state,&root,&archive,"long secret phrase").unwrap().goals,1);
         let current=state.db.lock().unwrap();
@@ -1602,7 +1661,11 @@ mod tests {
         let backups:Vec<PathBuf>=std::fs::read_dir(&root).unwrap().map(|entry|entry.unwrap().path()).filter(|path|path.file_name().unwrap().to_string_lossy().starts_with("before-import-")).collect();
         assert_eq!(backups.len(),1);
         assert_eq!(inspect_backup_file(&backups[0]).unwrap().goals,1);
-        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".staged-import-")));
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry| {
+            let name=entry.unwrap().file_name();
+            let name=name.to_string_lossy();
+            name.starts_with(".staged-import-") || name.starts_with(".import-") || name.starts_with(".export-")
+        }));
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

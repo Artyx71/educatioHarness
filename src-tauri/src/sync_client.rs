@@ -76,6 +76,26 @@ pub async fn agent(base:&str,token:&str,payload:&Value) -> Result<Value,String> 
     Ok(value)
 }
 
+#[cfg(any(mobile, test))]
+pub async fn validate_agent_connection(base:&str,token:&str,model:&str) -> Result<(),String> {
+    if model.is_empty() || model.len()>80 || !model.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte,b'.'|b'_'|b'-')) {
+        return Err("Выберите корректную модель ИИ".into());
+    }
+    let response=agent(base,token,&serde_json::json!({
+        "operation":"validate",
+        "model":model,
+        "input":{"question":"Проверь подключение"}
+    })).await.map_err(|error| {
+        if error.contains("Agent provider is not configured") {
+            "На сервере не настроен провайдер ИИ. Включите AI-шлюз на своём сервере и повторите подключение".to_string()
+        } else { error }
+    })?;
+    if response.get("connected") != Some(&Value::Bool(true)) {
+        return Err("Сервер ответил, но не подтвердил подключение модели ИИ".into());
+    }
+    Ok(())
+}
+
 pub fn upload(base:&str,token:&str,archive:Vec<u8>,expected_etag:Option<&str>) -> Result<String,String> {
     if archive.len()<52||archive.len()>MAX_ARCHIVE_BYTES||!archive.starts_with(b"EDUHBA01") { return Err("Выберите защищённый архив .ehb до 100 МБ".into()); }
     let url=endpoint(base)?;
@@ -227,6 +247,33 @@ mod tests {
         });
         let result=agent(&format!("http://127.0.0.1:{port}/"),"test-token-with-at-least-thirty-two-bytes",&serde_json::json!({"operation":"validate","model":"gpt-6-luna","input":{}})).await.unwrap();
         assert_eq!(result["connected"],true);
+        server.join().unwrap();
+    }
+    #[tokio::test]
+    async fn mobile_connection_requires_a_real_agent_response() {
+        use std::{io::{Read,Write},net::TcpListener,thread};
+        let token="test-token-with-at-least-thirty-two-bytes";
+        assert!(validate_agent_connection("http://127.0.0.1:1/",token,"bad model").await.unwrap_err().contains("модель"));
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let server=thread::spawn(move || {
+            for (status,body) in [
+                ("503 Service Unavailable",r#"{"error":"Agent provider is not configured on the server"}"#),
+                ("200 OK",r#"{"connected":false,"_execution":{"durationMs":1}}"#),
+                ("200 OK",r#"{"connected":true,"_execution":{"durationMs":1}}"#),
+            ] {
+                let (mut stream,_)=listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut buffer=[0u8;4096];
+                let count=stream.read(&mut buffer).unwrap();
+                assert!(String::from_utf8_lossy(&buffer[..count]).starts_with("POST /v1/agent "));
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nX-Educatio-Sync: 1\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).unwrap();
+            }
+        });
+        let url=format!("http://127.0.0.1:{port}/");
+        assert!(validate_agent_connection(&url,token,"gpt-6.1-sol").await.unwrap_err().contains("не настроен"));
+        assert!(validate_agent_connection(&url,token,"gpt-6.1-sol").await.unwrap_err().contains("не подтвердил"));
+        validate_agent_connection(&url,token,"gpt-6.1-sol").await.unwrap();
         server.join().unwrap();
     }
 }
