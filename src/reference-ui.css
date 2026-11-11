@@ -14,6 +14,7 @@ body,.main{background:#111}
 .skill-selects{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:3px 12px;margin:15px 0}
 .model-picker{margin:8px 0 16px}.model-picker>span{display:block;color:#aaa;font-size:12px;margin-bottom:8px}.model-toggle{display:flex;gap:3px;padding:3px;border:1px solid #414141;border-radius:8px;background:#161616}.model-toggle button{flex:1;min-width:0;text-align:left;border:1px solid transparent;border-radius:5px;background:transparent;color:#999;padding:8px 10px}.model-toggle button:hover{color:#eee}.model-toggle button.active{background:#2c2c2c;border-color:#555;color:#eee}.model-toggle strong,.model-toggle small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.model-toggle strong{font-size:11px;font-weight:600}.model-toggle small{font-size:9px;color:#888;margin-top:3px}
 .provider-toggle button{min-height:44px}
+.transfer-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.transfer-import{border-top:1px solid #363636;margin-top:20px;padding-top:16px}.transfer-fields label,.transfer-import label{font-size:11px}.transfer-fields input,.transfer-import input{margin:6px 0 12px}.legacy-transfer{margin-top:20px;color:#999;font-size:11px}.legacy-transfer summary{cursor:pointer}.legacy-transfer p{margin:10px 0}
 .sidebar-actions{display:grid;gap:2px;margin-top:5px}
 .sidebar-actions button,.ref-bottom button{display:flex;align-items:center;gap:10px;width:100%;background:transparent;color:#aaa;border:0;border-radius:5px;text-align:left;padding:10px 12px;font-size:10px;font-weight:700;letter-spacing:.13em}
 .sidebar-actions button:hover,.ref-bottom button:hover{background:#252525;color:#eee}
@@ -112,6 +113,7 @@ select option{background-color:var(--field-bg);color:var(--field-text)}
 .react-flow__node.graph-dimmed{opacity:.4}.react-flow__node.graph-related{border-color:#a9bfac;color:#f3f3f3}.graph-relation{padding:7px 0;border-bottom:1px solid #383838}.graph-relation small{color:#8fa593}.graph-relation p{margin:4px 0;color:#ccc;font-size:11px}
 .graph-filters{display:flex;gap:8px;align-items:center}.graph-filters select{width:min(210px,26vw)}.graph-filters input{width:min(230px,26vw)}
 @media(max-width:900px){.graph-page>.section-head{align-items:stretch;flex-direction:column}.graph-filters select,.graph-filters input{width:50%;max-width:none!important}}
+@media(max-width:600px){.transfer-fields{grid-template-columns:1fr}}
 @media(max-width:800px){.topic-dashboard,.activity-dashboard,.review-prompt{width:min(390px,calc(100vw - 220px))}.answer-toolbar span:last-child{display:none}}
 .mobile-nav,.mobile-plan-button,.mobile-plan-backdrop,.mobile-plan-close{display:none}
 @media(max-width:640px){

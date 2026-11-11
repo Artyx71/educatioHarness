@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tauri::{Emitter, Manager, State};
+mod portable_backup;
 
 struct AppState { db: Mutex<Connection>, startup_error: Option<String>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>> }
 
@@ -226,6 +227,48 @@ fn backup_path(path: &str, must_exist: bool) -> Result<PathBuf, String> {
     Ok(file)
 }
 
+fn portable_backup_path(path: &str, must_exist: bool) -> Result<PathBuf, String> {
+    let file = PathBuf::from(path);
+    if !file.is_absolute() || file.extension().and_then(|s| s.to_str()) != Some("ehb") || path.len() > 4096 {
+        return Err("Выберите абсолютный путь к файлу .ehb".into());
+    }
+    if must_exist {
+        let meta = std::fs::symlink_metadata(&file).map_err(|e| e.to_string())?;
+        if !meta.file_type().is_file() || meta.len() > (portable_backup::MAX_PLAINTEXT_SIZE + 52) as u64 {
+            return Err("Некорректный или слишком большой архив educatioHarness".into());
+        }
+    } else if std::fs::symlink_metadata(&file).is_ok() {
+        return Err("Файл уже существует. Выберите другое имя для защищённого архива".into());
+    }
+    Ok(file)
+}
+
+fn create_private_file(path: &std::path::Path) -> Result<std::fs::File, String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|e| e.to_string())
+}
+
+fn decrypted_backup_file(path: &std::path::Path, password: &str) -> Result<PathBuf, String> {
+    let archive = std::fs::read(path).map_err(|e| e.to_string())?;
+    let plaintext = portable_backup::decrypt(&archive, password)?;
+    let temporary = app_dir()?.join(format!(".import-{}.sqlite3", uuid::Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = create_private_file(&temporary)?;
+        file.write_all(&plaintext).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        inspect_backup_file(&temporary)?;
+        Ok(temporary.clone())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    result
+}
+
 fn inspect_backup_file(path: &std::path::Path) -> Result<BackupInfo, String> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
     let integrity: String = db.query_row("PRAGMA integrity_check", [], |r|r.get(0)).map_err(|e|e.to_string())?;
@@ -279,14 +322,65 @@ fn export_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
 }
 
 #[tauri::command]
+fn export_portable_backup(state: State<AppState>, path: String, password: String) -> Result<BackupInfo, String> {
+    let destination = portable_backup_path(&path, false)?;
+    let temporary = app_dir()?.join(format!(".export-{}.sqlite3", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let source = state.db.lock().map_err(|e| e.to_string())?;
+        drop(create_private_file(&temporary)?);
+        let mut copy = Connection::open(&temporary).map_err(|e| e.to_string())?;
+        Backup::new(&source, &mut copy).and_then(|backup| backup.run_to_completion(100, Duration::from_millis(10), None)).map_err(|e| e.to_string())?;
+        drop(copy);
+        drop(source);
+        let info = inspect_backup_file(&temporary)?;
+        let plaintext = std::fs::read(&temporary).map_err(|e| e.to_string())?;
+        let encrypted = portable_backup::encrypt(&plaintext, &password)?;
+        use std::io::Write;
+        let mut file = create_private_file(&destination)?;
+        if let Err(error) = file.write_all(&encrypted).and_then(|_| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&destination);
+            return Err(error.to_string());
+        }
+        Ok(info)
+    })();
+    let _ = std::fs::remove_file(&temporary);
+    result
+}
+
+#[tauri::command]
+fn inspect_portable_backup(path: String, password: String) -> Result<BackupInfo, String> {
+    let source = portable_backup_path(&path, true)?;
+    let temporary = decrypted_backup_file(&source, &password)?;
+    let result = inspect_backup_file(&temporary);
+    let _ = std::fs::remove_file(temporary);
+    result
+}
+
+#[tauri::command]
+fn import_portable_backup(state: State<AppState>, path: String, password: String) -> Result<BackupInfo, String> {
+    if !state.runs.lock().map_err(|e| e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
+    let source = portable_backup_path(&path, true)?;
+    let temporary = decrypted_backup_file(&source, &password)?;
+    let result = import_backup_file(&state, &temporary);
+    let _ = std::fs::remove_file(temporary);
+    result
+}
+
+#[tauri::command]
 fn import_backup(state: State<AppState>, path: String) -> Result<BackupInfo, String> {
     if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
     let source_path = backup_path(&path,true)?;
+    import_backup_file(&state, &source_path)
+}
+
+fn import_backup_file(state: &AppState, source_path: &std::path::Path) -> Result<BackupInfo, String> {
     let info = inspect_backup_file(&source_path)?;
     let source = Connection::open_with_flags(&source_path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
     let mut target = state.db.lock().map_err(|e|e.to_string())?;
-    if is_live_database_path(&target,&source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
+    if is_live_database_path(&target,source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
     let safety_path = app_dir()?.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
+    drop(create_private_file(&safety_path)?);
     let mut safety = Connection::open(&safety_path).map_err(|e|e.to_string())?;
     Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
     drop(safety);
@@ -686,7 +780,7 @@ pub fn run() {
     };
     tauri::Builder::default().manage(AppState { db: Mutex::new(db), startup_error, runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_obsidian])
+        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_portable_backup,inspect_portable_backup,import_portable_backup,export_obsidian])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<AppState>();
@@ -938,6 +1032,28 @@ mod tests {
         assert_eq!(title,"Изучить C");
         drop(from_archive);
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn encrypted_archive_preserves_schema_and_never_imports_wrong_password() {
+        let root = std::env::temp_dir().join(format!("educatio-protected-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("source.sqlite3");
+        let db = Connection::open(&path).unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO learning_goals VALUES ('goal','Изучить C','now','now')", []).unwrap();
+        drop(db);
+        let plain = std::fs::read(&path).unwrap();
+        let encrypted = portable_backup::encrypt(&plain, "long secret phrase").unwrap();
+        let archive = root.join("portable.ehb");
+        std::fs::write(&archive, &encrypted).unwrap();
+        assert!(portable_backup::decrypt(&encrypted, "incorrect password").is_err());
+        let restored = root.join("restored.sqlite3");
+        std::fs::write(&restored, portable_backup::decrypt(&encrypted, "long secret phrase").unwrap()).unwrap();
+        assert_eq!(inspect_backup_file(&restored).unwrap().goals, 1);
+        let mut tampered = encrypted;
+        tampered[8] ^= 1;
+        assert!(portable_backup::decrypt(&tampered, "long secret phrase").is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn data_directory_move_keeps_old_database_and_reopens_copy() {
