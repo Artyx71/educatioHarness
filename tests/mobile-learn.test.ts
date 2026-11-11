@@ -2,14 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Learn } from '../src/app/App';
+import { ConfirmationProvider } from '../src/components/ConfirmProvider';
 import type { Snapshot } from '../src/lib/types';
 
 describe('narrow learning shell',()=>{
   it('renders a plan control without a stray zero when no topics exist',()=>{
-    const html=renderToStaticMarkup(createElement(Learn,{
+    const html=renderToStaticMarkup(createElement(ConfirmationProvider,null,createElement(Learn,{
       snap:{messages:[],diagnostic_answers:[],learning_goals:[],workflow_executions:[]} as unknown as Snapshot,
       topics:[],config:{provider:'codex',model:'default'},busy:'',run:()=>{},onGoal:()=>{},onTopic:()=>{},
-    }));
+    })));
     expect(html).toContain('mobile-plan-button');
     expect(html).toContain('Новая учебная цель');
     expect(html).not.toMatch(/>0\s*<\/section>/);
@@ -21,11 +22,11 @@ describe('narrow learning shell',()=>{
       workflow_executions:[{id:'session:teach',status:'waiting_for_user',output:JSON.stringify({topicId:'pointers'})}],
     } as unknown as Snapshot;
     const props={snap,goalId:'goal',sessionId:'session',topics:[topic],topic,config:{provider:'codex' as const,model:'default'},busy:'',run:()=>{},onGoal:()=>{},onTopic:()=>{}};
-    const waiting=renderToStaticMarkup(createElement(Learn,props));
+    const waiting=renderToStaticMarkup(createElement(ConfirmationProvider,null,createElement(Learn,props)));
     expect(waiting).toContain('Опишите ход мысли');
     expect(waiting).not.toContain('Продолжить: Указатели');
     snap.workflow_executions[0].status='failed';
-    expect(renderToStaticMarkup(createElement(Learn,props))).toContain('Продолжить: Указатели');
+    expect(renderToStaticMarkup(createElement(ConfirmationProvider,null,createElement(Learn,props)))).toContain('Продолжить: Указатели');
   });
   it('shows a retry action for interrupted knowledge extraction',()=>{
     const topic={id:'pointers',curriculum_id:'plan',title:'Указатели',description:'',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'in_progress',position:0};
@@ -33,7 +34,7 @@ describe('narrow learning shell',()=>{
       learning_goals:[{id:'goal',title:'Изучить C'}],sessions:[],diagnostic_answers:[],messages:[],
       workflow_executions:[{id:'message:extract',goal_id:'goal',session_id:'session',step_id:'extract',status:'running',input:'{}'}],
     } as unknown as Snapshot;
-    const html=renderToStaticMarkup(createElement(Learn,{snap,goalId:'goal',sessionId:'session',topics:[topic],topic,config:{provider:'codex',model:'default'},busy:'',run:()=>{},onGoal:()=>{},onTopic:()=>{}}));
+    const html=renderToStaticMarkup(createElement(ConfirmationProvider,null,createElement(Learn,{snap,goalId:'goal',sessionId:'session',topics:[topic],topic,config:{provider:'codex',model:'default'},busy:'',run:()=>{},onGoal:()=>{},onTopic:()=>{}})));
     expect(html).toContain('Граф знаний не обновился');
     expect(html).toContain('Повторить извлечение');
   });

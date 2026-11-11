@@ -1606,6 +1606,29 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    #[ignore = "manual GUI export check; set EDUCATIO_GUI_ARCHIVE_PATH and EDUCATIO_GUI_ARCHIVE_PASSWORD"]
+    fn inspect_gui_export_fixture() {
+        let archive_path=PathBuf::from(std::env::var("EDUCATIO_GUI_ARCHIVE_PATH").expect("set archive path"));
+        let password=std::env::var("EDUCATIO_GUI_ARCHIVE_PASSWORD").expect("set archive password");
+        let archive=std::fs::read(archive_path).unwrap();
+        assert!(archive.starts_with(b"EDUHBA01"));
+        assert!(!archive.windows(b"transfer-desktop-goal".len()).any(|part|part==b"transfer-desktop-goal"));
+        assert!(portable_backup::decrypt(&archive,"incorrect gui password").is_err());
+        let root=std::env::temp_dir().join(format!("educatio-gui-archive-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let restored=decrypted_backup_bytes_at(&root,&archive,&password).unwrap();
+        let info=inspect_backup_file(&restored).unwrap();
+        assert_eq!((info.goals,info.sessions,info.attempts,info.version),(1,1,1,5));
+        let db=Connection::open_with_flags(&restored,OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let goal:String=db.query_row("SELECT id FROM learning_goals",[],|row|row.get(0)).unwrap();
+        let provenance:i64=db.query_row("SELECT count(*) FROM knowledge_provenance",[],|row|row.get(0)).unwrap();
+        assert_eq!(goal,"transfer-desktop-goal");
+        assert_eq!(provenance,1);
+        drop(db);
+        remove_temporary_database(&restored).unwrap();
+        std::fs::remove_dir(&root).unwrap();
+    }
+    #[test]
     #[ignore = "manual desktop-to-Android transfer; set EDUCATIO_TRANSFER_FIXTURE_DIR to an empty test directory"]
     fn write_desktop_to_android_transfer_fixture() {
         let root=PathBuf::from(std::env::var("EDUCATIO_TRANSFER_FIXTURE_DIR").expect("set EDUCATIO_TRANSFER_FIXTURE_DIR"));

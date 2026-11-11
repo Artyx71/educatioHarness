@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { open, save, confirm } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { BookOpen, BrainCircuit, Dumbbell, Settings2, ArrowRight, PlugZap, LoaderCircle, Plus, LogOut, Search, Network, Square, FileUp } from 'lucide-react';
 import { api, cancelActiveAgent, now } from '../lib/api';
@@ -16,6 +16,7 @@ import { activitySummary } from '../features/profile/activity';
 import { ProfileSettings } from '../features/profile/ProfileSettings';
 import { phaseLabel, exerciseLabel, verdictLabel } from '../lib/i18n';
 import { SessionActions } from '../components/SessionActions';
+import { useConfirm } from '../components/ConfirmProvider';
 import { PlanImporter } from '../features/learning/PlanImporter';
 import { ruCount } from '../lib/ru-count';
 import { learningAgentTasks, shouldBlockOfflineAgentTask, shouldRequireConnection } from './connectionGate';
@@ -29,6 +30,7 @@ const cancellableAgentTasks=new Set([...learningAgentTasks,'Проверка п�
 const isCancellableAgentTask=(label:string)=>cancellableAgentTasks.has(label);
 
 export default function App() {
+  const confirm = useConfirm();
   const qc=useQueryClient(); const ui=useUi();
   const {data:snap=empty,error:dbError}=useQuery({queryKey:['snapshot'],queryFn:api.snapshot});
   const {data:auth,error:authError,refetch:refreshAuth}=useQuery({queryKey:['auth'],queryFn:api.auth,refetchInterval:6000});
@@ -178,6 +180,7 @@ export function Learn({snap,goalId,sessionId,topics,topic,config,busy,run,import
 }
 
 function TopicEditor({topic,topics,busy,run,onRemoved}:{topic:Topic;topics:Topic[];busy:boolean;run:(label:string,fn:()=>Promise<unknown>)=>void;onRemoved:()=>void}){
+  const confirm = useConfirm();
   const [title,setTitle]=useState(topic.title);
   const [description,setDescription]=useState(topic.description);
   const [status,setStatus]=useState(topic.status);
@@ -248,6 +251,7 @@ function PracticePage({goalId,topics,initialTopicId,snap,config,busy,run}:{goalI
 function History({snap,busy,onOpen,onRename,onDelete,onDeleteGoal}:{snap:Snapshot;busy:boolean;onOpen:(id:string)=>void;onRename:(session:Session,title:string)=>void;onDelete:(session:Session)=>void;onDeleteGoal:(goalId:string)=>void}){return <div className="page"><span className="eyebrow">ИСТОРИЯ</span><h1>Учебные занятия</h1><div className="panel list-panel">{snap.sessions.length?snap.sessions.slice().reverse().map(s=><div className="history-item" key={s.id}><button className="history-row" onClick={()=>onOpen(s.id)}><div><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)} · {snap.messages.filter(m=>m.session_id===s.id).length} сообщений</small></div><ArrowRight size={16}/></button><SessionActions session={s} busy={busy} onRename={onRename} onDelete={onDelete} onDeleteGoal={onDeleteGoal}/></div>):<p className="muted">Занятий пока нет.</p>}</div></div>}
 
 export function Settings({auth,snapshot,provider,model,busy,run,saveConfig,refreshAuth,savedDirectories,savedOverrides,savedServerUrl,savedServerEtag}:{auth?:AuthStatus;snapshot:Snapshot;provider:Provider;model:string;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void;saveConfig:(p:Provider,m:string)=>Promise<void>;refreshAuth:()=>Promise<unknown>;savedDirectories:string;savedOverrides:string;savedServerUrl:string;savedServerEtag:string}){
+  const confirm = useConfirm();
   const [key,setKey]=useState('');const [message,setMessage]=useState('');const [transferMessage,setTransferMessage]=useState('');
   const [exportPassword,setExportPassword]=useState('');const [confirmPassword,setConfirmPassword]=useState('');const [importPassword,setImportPassword]=useState('');
   const [serverUrl,setServerUrl]=useState(savedServerUrl);const [serverToken,setServerToken]=useState('');const [syncPassword,setSyncPassword]=useState('');const [syncMessage,setSyncMessage]=useState('');
