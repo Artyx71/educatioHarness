@@ -832,7 +832,7 @@ fn delete_record(state: State<AppState>, table: String, id: String) -> Result<()
 }
 
 fn delete_record_db(db: &Connection, table: &str, id: &str) -> Result<(), String> {
-    if !["curricula","topics","knowledge_nodes","knowledge_edges","exercises","learning_goals"].contains(&table) { return Err("Unsupported delete".into()); }
+    if !["sessions","curricula","topics","knowledge_nodes","knowledge_edges","exercises","learning_goals"].contains(&table) { return Err("Unsupported delete".into()); }
     if id.len() > 128 || id.is_empty() { return Err("Invalid ID".into()); }
     if table == "topics" {
         let mut stmt=db.prepare("SELECT prerequisites FROM topics WHERE id!=?1 AND curriculum_id=(SELECT curriculum_id FROM topics WHERE id=?1)").map_err(|e|e.to_string())?;
@@ -1332,6 +1332,47 @@ mod tests {
         let links:i64=conn.query_row("SELECT count(*) FROM knowledge_topic_links",[],|row|row.get(0)).unwrap();
         assert_eq!((topics,links),(0,0));
         assert!(delete_record_db(&conn,"messages","anything").is_err());
+    }
+    #[test]
+    fn deleting_session_cascades_chat_but_preserves_curriculum_and_graph() {
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("INSERT INTO learning_goals VALUES ('g','C','t','t');
+            INSERT INTO sessions VALUES ('s','g','learning','Занятие','t','t');
+            INSERT INTO messages VALUES ('m','s','user','Ответ','teaching-answer','t');
+            INSERT INTO diagnostic_answers VALUES ('a','s','Вопрос','Ответ','Мысль','', 't');
+            INSERT INTO curricula VALUES ('c','g','t','t');
+            INSERT INTO knowledge_nodes VALUES ('n','g','concept','C','Описание','s','m','t');").unwrap();
+        delete_record_db(&conn,"sessions","s").unwrap();
+        for table in ["sessions","messages","diagnostic_answers"] {
+            let count:i64=conn.query_row(&format!("SELECT count(*) FROM {table}"),[],|row|row.get(0)).unwrap();
+            assert_eq!(count,0,"{table}");
+        }
+        for table in ["learning_goals","curricula","knowledge_nodes"] {
+            let count:i64=conn.query_row(&format!("SELECT count(*) FROM {table}"),[],|row|row.get(0)).unwrap();
+            assert_eq!(count,1,"{table}");
+        }
+        let sources:(Option<String>,Option<String>)=conn.query_row("SELECT source_session_id,source_message_id FROM knowledge_nodes WHERE id='n'",[],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(sources,(None,None));
+    }
+    #[test]
+    fn deleting_goal_removes_plan_practice_and_graph() {
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("INSERT INTO learning_goals VALUES ('g','C','t','t');
+            INSERT INTO sessions VALUES ('s','g','learning','Занятие','t','t');
+            INSERT INTO curricula VALUES ('c','g','t','t');
+            INSERT INTO topics VALUES ('topic','c','Указатели','desc','[]','[]','beginner','pending',0);
+            INSERT INTO exercises VALUES ('e','g','topic','short_answer','Что такое адрес?','Позиция в памяти','t');
+            INSERT INTO attempts VALUES ('a','e','Ответ','Мысль','Верно','t');
+            INSERT INTO knowledge_nodes VALUES ('n','g','concept','C','Описание','s',NULL,'t');").unwrap();
+        delete_record_db(&conn,"learning_goals","g").unwrap();
+        for table in ["learning_goals","sessions","curricula","topics","exercises","attempts","knowledge_nodes"] {
+            let count:i64=conn.query_row(&format!("SELECT count(*) FROM {table}"),[],|row|row.get(0)).unwrap();
+            assert_eq!(count,0,"{table}");
+        }
     }
     #[test]
     fn prerequisite_topic_cannot_be_deleted_until_dependencies_are_removed() {

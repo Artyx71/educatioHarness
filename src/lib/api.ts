@@ -20,7 +20,7 @@ type SaveRecords = {
   agent_executions:AgentExecution;
   preferences:Snapshot['preferences'][number];
 };
-type DeletableTable = 'curricula'|'topics'|'knowledge_nodes'|'knowledge_edges'|'exercises'|'learning_goals';
+type DeletableTable = 'sessions'|'curricula'|'topics'|'knowledge_nodes'|'knowledge_edges'|'exercises'|'learning_goals';
 
 export const id = () => crypto.randomUUID();
 export const now = () => new Date().toISOString();

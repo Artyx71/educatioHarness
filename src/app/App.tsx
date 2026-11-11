@@ -2,10 +2,10 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { open, save, confirm } from '@tauri-apps/plugin-dialog';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BookOpen, BrainCircuit, Dumbbell, Settings2, ArrowRight, PlugZap, LoaderCircle, Plus, LogOut, Search, Network } from 'lucide-react';
-import { api, cancelActiveAgent } from '../lib/api';
+import { BookOpen, BrainCircuit, Dumbbell, Settings2, ArrowRight, PlugZap, LoaderCircle, Plus, LogOut, Search, Network, Square } from 'lucide-react';
+import { api, cancelActiveAgent, now } from '../lib/api';
 import brandIcon from '../../src-tauri/icons/icon.svg';
-import type { AuthStatus, Exercise, Provider, Snapshot, Topic } from '../lib/types';
+import type { AuthStatus, Exercise, Provider, Session, Snapshot, Topic } from '../lib/types';
 import { useUi } from '../stores/ui';
 import { activeGoal, evaluateExercise, finishProbe, generateExercise, orderCurriculumTopics, parseStringList, resumeProbe, retryKnowledgeExtraction, startGoal, startLearningSession, teach, type Config } from '../features/learning/engine';
 import { SkillSettings, parseSkillOverrides } from '../features/settings/SkillSettings';
@@ -15,12 +15,15 @@ import { parsePracticeFeedback, reviewSuggestion } from '../features/practice/re
 import { activitySummary } from '../features/profile/activity';
 import { ProfileSettings } from '../features/profile/ProfileSettings';
 import { phaseLabel, exerciseLabel, verdictLabel } from '../lib/i18n';
+import { SessionActions } from '../components/SessionActions';
 
 const empty:Snapshot={learning_goals:[],sessions:[],messages:[],diagnostic_answers:[],curricula:[],topics:[],exercises:[],attempts:[],knowledge_nodes:[],knowledge_edges:[],knowledge_topic_links:[],knowledge_provenance:[],workflow_executions:[],agent_executions:[],preferences:[]};
 const Graph = lazy(() => import('../features/knowledge-graph/Graph').then(module => ({default:module.Graph})));
 const ReviewRun = lazy(() => import('../features/practice/ReviewRun').then(module => ({default:module.ReviewRun})));
 const defaultApiModel='gpt-6.1-sol';
 const mobileRuntime=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const cancellableAgentTasks=new Set(['Подготовка диагностики','Продолжение диагностики','Построение плана','Подготовка урока','Разбор ответа','Подготовка задания','Проверка ответа','Подготовка итогового повторения','Продолжение итогового повторения','Завершение повторения','Обновление графа знаний','Проверка подключения','Проверка ключа']);
+const isCancellableAgentTask=(label:string)=>cancellableAgentTasks.has(label);
 
 export default function App() {
   const qc=useQueryClient(); const ui=useUi();
@@ -53,6 +56,31 @@ export default function App() {
       setBusy('');setProgressChars(0);
     }
   }
+  const renameSession=(item:Session,title:string)=>run('Переименование занятия',()=>api.save('sessions',{...item,title,updated_at:now()}));
+  const deleteSession=(item:Session)=>run('Удаление занятия',async()=>{
+    const otherSessions=snap.sessions.filter(other=>other.id!==item.id);
+    if(!await confirm('Удалятся сообщения и ответы этого занятия. Учебная цель, план, практика и граф знаний останутся. Отменить удаление нельзя. Продолжить?',{title:'Удалить только занятие',kind:'warning'})) return;
+    await api.remove('sessions',item.id);
+    if(session?.id===item.id){
+      const next=otherSessions.find(other=>other.goal_id===item.goal_id);
+      ui.setSession(next?.id??null);
+      ui.setGoal(item.goal_id);
+      ui.setPage('dashboard');
+    }
+  });
+  const deleteGoal=(goalId:string)=>run('Удаление учебной цели',async()=>{
+    const target=snap.learning_goals.find(item=>item.id===goalId);
+    if(!target) return;
+    const goalSessions=snap.sessions.filter(item=>item.goal_id===goalId).length;
+    const goalCurriculum=snap.curricula.find(item=>item.goal_id===goalId);
+    const goalTopics=snap.topics.filter(item=>item.curriculum_id===goalCurriculum?.id).length;
+    const goalExercises=snap.exercises.filter(item=>item.goal_id===goalId).length;
+    const goalNodes=snap.knowledge_nodes.filter(item=>item.goal_id===goalId).length;
+    const detail=`«${target.title}»: ${goalSessions} занятий, ${goalTopics} тем, ${goalExercises} заданий и ${goalNodes} узлов графа. Все эти данные будут удалены без возможности отмены. Продолжить?`;
+    if(!await confirm(detail,{title:'Удалить цель и все данные',kind:'warning'})) return;
+    await api.remove('learning_goals',goalId);
+    if(goal?.id===goalId){ui.setGoal(null);ui.setSession(null);ui.setTopic('');ui.setPage('dashboard')}
+  });
   async function saveConfig(p:Provider,m:string){setProvider(p);setModel(m);await api.save('preferences',{key:'provider',value:p});await api.save('preferences',{key:'model',value:m});await refresh()}
   const mustConnect=!connected;
   if(dbError) return <div className="fatal"><h1>Не удалось открыть данные</h1><p>{String(dbError)}</p><p>Проверьте доступность выбранного каталога и запустите приложение снова. Существующая база не заменялась пустой.</p></div>;
@@ -60,18 +88,17 @@ export default function App() {
     <button className="brand ref-brand" onClick={()=>ui.setPage('dashboard')} aria-label="На главную"><div className="brand-mark"><img src={brandIcon} alt=""/></div><div>educatioHarness</div></button>
     <div className="sidebar-actions"><button onClick={()=>{ui.setGoal('');ui.setSession('');ui.setPage('learn')}}><Plus size={15}/> ОБУЧЕНИЕ</button>{goal&&topics.length>0&&<button disabled={!!busy} onClick={()=>run('Новое занятие',async()=>{const next=await startLearningSession(goal.id);ui.setSession(next);ui.setPage('learn')})}><BookOpen size={15}/> НОВОЕ ЗАНЯТИЕ</button>}<button onClick={()=>ui.setPage('practice')}><Dumbbell size={15}/> ПРАКТИКА</button></div>
     <div className="sessions-heading"><span>ЗАНЯТИЯ</span></div><label className="session-search"><Search size={13}/><input aria-label="Поиск занятий" placeholder="Поиск..." value={sessionSearch} onChange={e=>setSessionSearch(e.target.value)}/></label>
-    <div className="session-list">{snap.sessions.slice().reverse().filter(s=>s.title.toLocaleLowerCase('ru').includes(sessionSearch.toLocaleLowerCase('ru'))).map(s=><button key={s.id} className={session?.id===s.id&&ui.page==='learn'?'selected':''} onClick={()=>{ui.setSession(s.id);ui.setGoal(s.goal_id);ui.setPage('learn')}}><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)}</small></button>)}{!snap.sessions.length&&<p>Пока нет занятий</p>}</div>
+    <div className="session-list">{snap.sessions.slice().reverse().filter(s=>s.title.toLocaleLowerCase('ru').includes(sessionSearch.toLocaleLowerCase('ru'))).map(s=><div className="session-item" key={s.id}><button className={`session-open ${session?.id===s.id&&ui.page==='learn'?'selected':''}`} onClick={()=>{ui.setSession(s.id);ui.setGoal(s.goal_id);ui.setPage('learn')}}><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)}</small></button><SessionActions session={s} busy={!!busy} onRename={renameSession} onDelete={deleteSession} onDeleteGoal={deleteGoal}/></div>)}{!snap.sessions.length&&<p>Пока нет занятий</p>}</div>
     <div className="sidebar-bottom ref-bottom"><button onClick={()=>ui.setPage('graph')}><Network size={15}/> ГРАФ ЗНАНИЙ</button><button onClick={()=>ui.setPage('settings')}><Settings2 size={15}/> НАСТРОЙКИ</button><div className={`status ${connected?'online':'offline'}`}><span/>{connected?(provider==='server'?'Сервер настроен':`${provider==='codex'?'ChatGPT':'OpenAI API'} подключён`):'ИИ не подключён'}</div>{authError&&<p className="warn">{String(authError)}</p>}</div>
   </aside><main className="main">
     {mustConnect&&ui.page!=='settings'?<Connect auth={auth} busy={busy} error={error} onLogin={()=>run('Вход',async()=>{await api.login();await new Promise(r=>setTimeout(r,1500));await refreshAuth()})} onKey={key=>run('Проверка ключа',async()=>{await api.saveKey(key,defaultApiModel);await saveConfig('openai',defaultApiModel)})} onSettings={()=>ui.setPage('settings')}/>:
-    ui.page==='dashboard'?<Dashboard snap={snap} goalId={goal?.id} busy={busy} onStart={()=>ui.setPage('learn')} onPractice={()=>ui.setPage('practice')} onReview={topicId=>{ui.setTopic(topicId);ui.setPage('practice')}} onCreate={objective=>run('Подготовка диагностики',async()=>{const started=await startGoal(objective,config);ui.setGoal(started.goalId);ui.setSession(started.sessionId);ui.setPage('learn')})}/>:
+    ui.page==='dashboard'?<Dashboard snap={snap} goalId={goal?.id} busy={busy} onStart={()=>{if(goal&&!session&&topics.length)run('Новое занятие',async()=>{const next=await startLearningSession(goal.id);ui.setSession(next);ui.setPage('learn')});else ui.setPage('learn')}} onDeleteGoal={deleteGoal} onPractice={()=>ui.setPage('practice')} onReview={topicId=>{ui.setTopic(topicId);ui.setPage('practice')}} onCreate={objective=>run('Подготовка диагностики',async()=>{const started=await startGoal(objective,config);ui.setGoal(started.goalId);ui.setSession(started.sessionId);ui.setPage('learn')})}/>:
     ui.page==='learn'?<Learn snap={snap} goalId={goal?.id} sessionId={session?.id} topics={topics} topic={topic} config={config} busy={busy} run={run} onGoal={(g,s)=>{ui.setGoal(g);ui.setSession(s)}} onTopic={ui.setTopic}/>:
     ui.page==='graph'?<Suspense fallback={<div className="page muted">Загрузка графа…</div>}><Graph nodes={snap.knowledge_nodes.filter(n=>n.goal_id===goal?.id)} edges={snap.knowledge_edges.filter(e=>e.goal_id===goal?.id)} topics={topics} topicLinks={snap.knowledge_topic_links} sessions={snap.sessions} messages={snap.messages} provenance={snap.knowledge_provenance} onSave={node=>run('Сохранение утверждения',()=>api.save('knowledge_nodes',node))} onDelete={id=>run('Удаление утверждения',()=>api.remove('knowledge_nodes',id))} onOpenSession={id=>{const target=snap.sessions.find(item=>item.id===id);if(target){ui.setGoal(target.goal_id);ui.setSession(id);ui.setPage('learn')}}}/></Suspense>:
     ui.page==='practice'?<PracticePage goalId={goal?.id} topics={topics} initialTopicId={ui.topicId??''} snap={snap} config={config} busy={busy} run={run}/>:
-    ui.page==='history'?<History snap={snap} onOpen={id=>{ui.setSession(id);ui.setGoal(snap.sessions.find(s=>s.id===id)?.goal_id??null);ui.setPage('learn')}}/>:
+    ui.page==='history'?<History snap={snap} busy={!!busy} onRename={renameSession} onDelete={deleteSession} onDeleteGoal={deleteGoal} onOpen={id=>{ui.setSession(id);ui.setGoal(snap.sessions.find(s=>s.id===id)?.goal_id??null);ui.setPage('learn')}}/>:
     <Settings auth={auth} snapshot={snap} provider={provider} model={model} busy={busy} run={run} saveConfig={saveConfig} refreshAuth={refreshAuth} savedDirectories={savedDirectories} savedOverrides={savedOverrides} savedServerUrl={snap.preferences.find(p=>p.key==='sync_server_url')?.value??''} savedServerEtag={snap.preferences.find(p=>p.key==='sync_last_etag')?.value??''}/>}
-    {busy&&progressChars>0&&<div className="agent-progress">Ответ формируется · {progressChars} знаков</div>}
-    {busy&&<button className="cancel-agent" onClick={()=>void cancelActiveAgent()}>Отменить запрос</button>}
+    {busy&&<div className="agent-activity" role="status"><span className="agent-activity-pulse" aria-hidden="true"><i/><i/><i/></span><span className="agent-activity-copy"><strong>{busy}</strong><small>{progressChars>0?`Ответ формируется · ${progressChars} знаков`:'Идёт работа…'}</small></span>{isCancellableAgentTask(busy)&&<button type="button" onClick={()=>void cancelActiveAgent()} aria-label="Остановить запрос к ИИ"><Square size={12} fill="currentColor"/> Остановить</button>}</div>}
     {error&&(connected||ui.page==='settings')&&<div className="toast error" role="alert">{error}<button onClick={()=>setError('')} aria-label="Закрыть ошибку">×</button></div>}
   </main><nav className="mobile-nav" aria-label="Основная навигация">
     <button aria-current={ui.page==='dashboard'?'page':undefined} onClick={()=>ui.setPage('dashboard')}><BrainCircuit size={17}/><span>Главная</span></button>
@@ -88,18 +115,20 @@ function Connect({auth,busy,error,onLogin,onKey,onSettings}:{auth?:AuthStatus;bu
   return <div className="connect-wrap"><div className="connect-card"><div className="hero-icon"><PlugZap size={26}/></div><h1>Подключить ИИ</h1><p>{mobileRuntime?'На телефоне учебные запросы выполняет ваш сервер. Его токен хранится только до закрытия приложения.':'Подключите модель, чтобы начать персональное обучение.'}</p>{mobileRuntime?<button className="connect-option primary" onClick={onSettings}><span><strong>Подключить свой сервер</strong><small>HTTPS · серверный ИИ</small></span><ArrowRight size={18}/></button>:mode==='choice'?<><button className="connect-option primary" disabled={!auth?.codex_installed||!!busy} onClick={onLogin}><span><strong>Войти через ChatGPT</strong><small>Рекомендуем · официальный вход Codex</small></span><ArrowRight size={18}/></button><button className="connect-option" onClick={()=>setMode('key')}><span><strong>Использовать ключ OpenAI API</strong><small>Запросы оплачиваются через ваш API-аккаунт</small></span><ArrowRight size={18}/></button>{!auth?.codex_installed&&<p className="warn">Codex CLI не установлен. Установите его для входа через ChatGPT.</p>}</>:<><label>Ключ OpenAI API<input type="password" autoComplete="off" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-..."/></label><button className="button primary" disabled={!!busy||!key} onClick={()=>onKey(key)}>Проверить и сохранить ключ</button><button className="button ghost" onClick={()=>setMode('choice')}>Назад</button></>}{busy&&<p className="muted">{busy}… {busy==='Вход'?'Завершите вход в браузере — статус обновится автоматически.':'Выполняем реальный запрос к выбранной модели.'}</p>}{error&&<p className="warn">{error}</p>}<button className="subtle-link" onClick={onSettings}>Настройки подключения</button></div></div>;
 }
 
-function Dashboard({snap,goalId,busy,onStart,onPractice,onReview,onCreate}:{snap:Snapshot;goalId?:string;busy:string;onStart:()=>void;onPractice:()=>void;onReview:(topicId:string)=>void;onCreate:(objective:string)=>void}){
+function Dashboard({snap,goalId,busy,onStart,onDeleteGoal,onPractice,onReview,onCreate}:{snap:Snapshot;goalId?:string;busy:string;onStart:()=>void;onDeleteGoal:(goalId:string)=>void;onPractice:()=>void;onReview:(topicId:string)=>void;onCreate:(objective:string)=>void}){
   const [objective,setObjective]=useState('');
   const goal=snap.learning_goals.find(g=>g.id===goalId);
   const curriculum=snap.curricula.find(c=>c.goal_id===goal?.id);
   const goalTopics=snap.topics.filter(t=>t.curriculum_id===curriculum?.id).sort((a,b)=>a.position-b.position);
+  const goalSessions=snap.sessions.filter(item=>item.goal_id===goal?.id);
+  const retainedGoal=!!goal&&goalSessions.length===0;
   const review=reviewSuggestion(goalTopics,snap.exercises,snap.attempts);
   const dayKey=(date:Date)=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
   const {days:activeDays,streak}=activitySummary(snap);
   const days=Array.from({length:35},(_,i)=>{const day=new Date();day.setDate(day.getDate()-34+i);return dayKey(day)});
   return <div className="reference-home">
     <button className="home-graph-link" onClick={()=>useUi.getState().setPage('graph')}><BrainCircuit size={14}/> Граф знаний <ArrowRight size={13}/></button>
-    <div className="home-summary"><div className="home-mark"><BrainCircuit size={24}/></div><h1>Чему вы хотите научиться?</h1><p>{snap.knowledge_nodes.filter(n=>n.kind==='proposition').length} утверждений · {snap.knowledge_edges.length} связей</p><p>{snap.sessions.length} занятий · {snap.attempts.length} ответов в практике</p>{goalTopics.length>0&&<div className="topic-dashboard"><div className="topic-dashboard-head"><span>ТЕКУЩИЙ ПЛАН</span><span>{goalTopics.filter(t=>t.status==='completed').length} / {goalTopics.length} тем</span></div>{goalTopics.slice(0,5).map(t=><div key={t.id} className="topic-dashboard-row"><span className={`topic-dot ${t.status}`}/><span>{t.title}</span><small>{snap.attempts.filter(a=>snap.exercises.some(e=>e.id===a.exercise_id&&e.topic_id===t.id)).length} ответов</small></div>)}</div>}{review&&<button className="review-prompt" onClick={()=>onReview(review.topic.id)}><span><strong>Время повторить · {review.topic.title}</strong><small>{review.reason==='needs_work'?'В прошлый раз ответ вызвал трудности':'Тема давно не встречалась в практике'}</small></span><ArrowRight size={15}/></button>}<div className="activity-dashboard"><div className="topic-dashboard-head"><span>АКТИВНОСТЬ · 35 ДНЕЙ</span><span>{streak} дн. подряд</span></div><div className="activity-grid">{days.map(day=><span key={day} title={`${day}: ${activeDays.has(day)?'было занятие или ответ':'нет активности'}`} className={activeDays.has(day)?'active':''}/>)}</div></div>{goal&&<button className="text-button" onClick={onStart}>Продолжить: {goal.title} <ArrowRight size={14}/></button>}</div>
+    <div className="home-summary"><div className="home-mark"><BrainCircuit size={24}/></div><h1>Чему вы хотите научиться?</h1><p>{snap.knowledge_nodes.filter(n=>n.kind==='proposition').length} утверждений · {snap.knowledge_edges.length} связей</p><p>{snap.sessions.length} занятий · {snap.attempts.length} ответов в практике</p>{retainedGoal&&<div className="retained-goal" role="note"><strong>Занятия удалены, учебная цель осталась</strong><span>План, практика и граф знаний для «{goal.title}» хранятся отдельно. Можно продолжить обучение или удалить цель целиком.</span><button type="button" disabled={!!busy} onClick={()=>onDeleteGoal(goal.id)}>Удалить цель и все данные</button></div>}{goalTopics.length>0&&<div className="topic-dashboard"><div className="topic-dashboard-head"><span>ТЕКУЩИЙ ПЛАН</span><span>{goalTopics.filter(t=>t.status==='completed').length} / {goalTopics.length} тем</span></div>{goalTopics.slice(0,5).map(t=><div key={t.id} className="topic-dashboard-row"><span className={`topic-dot ${t.status}`}/><span>{t.title}</span><small>{snap.attempts.filter(a=>snap.exercises.some(e=>e.id===a.exercise_id&&e.topic_id===t.id)).length} ответов</small></div>)}</div>}{review&&<button className="review-prompt" onClick={()=>onReview(review.topic.id)}><span><strong>Время повторить · {review.topic.title}</strong><small>{review.reason==='needs_work'?'В прошлый раз ответ вызвал трудности':'Тема давно не встречалась в практике'}</small></span><ArrowRight size={15}/></button>}<div className="activity-dashboard"><div className="topic-dashboard-head"><span>АКТИВНОСТЬ · 35 ДНЕЙ</span><span>{streak} дн. подряд</span></div><div className="activity-grid">{days.map(day=><span key={day} title={`${day}: ${activeDays.has(day)?'было занятие или ответ':'нет активности'}`} className={activeDays.has(day)?'active':''}/>)}</div></div>{goal&&<button className="text-button" onClick={onStart}>Продолжить: {goal.title} <ArrowRight size={14}/></button>}</div>
     <div className="home-composer"><div className="home-input"><textarea value={objective} onChange={e=>setObjective(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&objective.trim().length>=6&&!busy){e.preventDefault();onCreate(objective.trim())}}} placeholder="Например: хочу изучить программирование на C" aria-label="Учебная цель"/><button disabled={objective.trim().length<6||!!busy} onClick={()=>onCreate(objective.trim())} aria-label="Начать обучение"><ArrowRight size={19}/></button></div><div className="home-composer-foot"><div className="mode-switch"><button className="active"><BookOpen size={13}/> ОБУЧЕНИЕ</button><button onClick={onPractice}><Dumbbell size={13}/> ПРАКТИКА</button></div><span>Сначала выясним, что вы уже знаете</span></div></div>
   </div>;
 }
@@ -205,7 +234,7 @@ function PracticePage({goalId,topics,initialTopicId,snap,config,busy,run}:{goalI
   </div>;
 }
 
-function History({snap,onOpen}:{snap:Snapshot;onOpen:(id:string)=>void}){return <div className="page"><span className="eyebrow">ИСТОРИЯ</span><h1>Учебные занятия</h1><div className="panel list-panel">{snap.sessions.length?snap.sessions.slice().reverse().map(s=><button className="history-row" key={s.id} onClick={()=>onOpen(s.id)}><div><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)} · {snap.messages.filter(m=>m.session_id===s.id).length} сообщений</small></div><ArrowRight size={16}/></button>):<p className="muted">Занятий пока нет.</p>}</div></div>}
+function History({snap,busy,onOpen,onRename,onDelete,onDeleteGoal}:{snap:Snapshot;busy:boolean;onOpen:(id:string)=>void;onRename:(session:Session,title:string)=>void;onDelete:(session:Session)=>void;onDeleteGoal:(goalId:string)=>void}){return <div className="page"><span className="eyebrow">ИСТОРИЯ</span><h1>Учебные занятия</h1><div className="panel list-panel">{snap.sessions.length?snap.sessions.slice().reverse().map(s=><div className="history-item" key={s.id}><button className="history-row" onClick={()=>onOpen(s.id)}><div><strong>{s.title}</strong><small>{phaseLabel[s.phase]??s.phase} · {s.updated_at.slice(0,10)} · {snap.messages.filter(m=>m.session_id===s.id).length} сообщений</small></div><ArrowRight size={16}/></button><SessionActions session={s} busy={busy} onRename={onRename} onDelete={onDelete} onDeleteGoal={onDeleteGoal}/></div>):<p className="muted">Занятий пока нет.</p>}</div></div>}
 
 export function Settings({auth,snapshot,provider,model,busy,run,saveConfig,refreshAuth,savedDirectories,savedOverrides,savedServerUrl,savedServerEtag}:{auth?:AuthStatus;snapshot:Snapshot;provider:Provider;model:string;busy:string;run:(label:string,fn:()=>Promise<unknown>)=>void;saveConfig:(p:Provider,m:string)=>Promise<void>;refreshAuth:()=>Promise<unknown>;savedDirectories:string;savedOverrides:string;savedServerUrl:string;savedServerEtag:string}){
   const [key,setKey]=useState('');const [message,setMessage]=useState('');const [transferMessage,setTransferMessage]=useState('');
