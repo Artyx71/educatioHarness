@@ -30,6 +30,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run runtime:bundle
+      - run: npm run runtime:smoke
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: npm run desktop:build
       - name: RPM package
