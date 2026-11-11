@@ -14,4 +14,12 @@ describe('settings model picker',()=>{
     expect(html).toContain('Выбор модели');
     for(const name of ['Авто','Sol','Terra','Luna']) expect(html).toContain(`<strong>${name}</strong>`);
   });
+  it('offers direct server import separately from downloading a backup file',()=>{
+    const client=new QueryClient();
+    client.setQueryData(['sync-status','https://study.example.org'],{has_archive:true,etag:'"current"'});
+    const html=renderToStaticMarkup(<QueryClientProvider client={client}><Settings snapshot={snapshot} provider="codex" model="default" busy="" run={()=>{}} saveConfig={async()=>{}} refreshAuth={async()=>{}} savedDirectories="[]" savedOverrides="{}" savedServerUrl="https://study.example.org" savedServerEtag=""/></QueryClientProvider>);
+    expect(html).toContain('Скачать .ehb');
+    expect(html).toContain('Скачать и развернуть данные');
+    expect(html).toContain('Сначала скачайте и разверните её с паролем');
+  });
 });

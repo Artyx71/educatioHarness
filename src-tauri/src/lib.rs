@@ -523,14 +523,15 @@ async fn sync_download(app: tauri::AppHandle, path: String) -> Result<(),String>
     tauri::async_runtime::spawn_blocking(move || {
         let destination=portable_backup_path(&path,false)?;
         let (url,token)=sync_credentials(&app.state::<AppState>())?;
-        let (archive,etag)=sync_client::download(&url,&token)?;
+        // A downloaded file is only a backup. Do not mark the server version
+        // as incorporated into local learning data until an import succeeds.
+        let (archive,_etag)=sync_client::download(&url,&token)?;
         let mut file=create_private_file(&destination)?;
         if let Err(error)=file.write_all(&archive).and_then(|_|file.sync_all()) {
             drop(file);
             let _=std::fs::remove_file(&destination);
             return Err(error.to_string());
         }
-        app.state::<AppState>().db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_last_etag',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![etag]).map_err(|e|e.to_string())?;
         Ok(())
     }).await.map_err(|e|e.to_string())?
 }
@@ -587,11 +588,15 @@ fn import_backup_file(state: &AppState, source_path: &std::path::Path, safety_di
         migrate(&staged)?;
         let mut target = state.db.lock().map_err(|e|e.to_string())?;
         if is_live_database_path(&target,source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
-        let local_sync:Vec<(String,String)>=target.prepare("SELECT key,value FROM preferences WHERE key IN ('sync_server_url','sync_last_etag')").map_err(|e|e.to_string())?
+        // Provider credentials, server connection and runtime threads belong to this device.
+        // Transfer the learning history, not another device's connection state.
+        let local_settings:Vec<(String,String)>=target.prepare("SELECT key,value FROM preferences WHERE key IN ('sync_server_url','provider','model')").map_err(|e|e.to_string())?
             .query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
             .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
-        staged.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides','sync_server_url','sync_last_etag')",[]).map_err(|e|e.to_string())?;
-        for (key,value) in local_sync {staged.execute("INSERT INTO preferences(key,value) VALUES(?1,?2)",params![key,value]).map_err(|e|e.to_string())?;}
+        // Any import invalidates the old upload baseline. sync_import_current
+        // records the downloaded archive ETag only after this import succeeds.
+        staged.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides','sync_server_url','sync_last_etag','provider','model') OR key LIKE 'thread:%'",[]).map_err(|e|e.to_string())?;
+        for (key,value) in local_settings {staged.execute("INSERT INTO preferences(key,value) VALUES(?1,?2)",params![key,value]).map_err(|e|e.to_string())?;}
         inspect_backup_file(&staged_path)?;
         let safety_path = safety_dir.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
         drop(create_private_file(&safety_path)?);
@@ -1546,18 +1551,26 @@ mod tests {
         source.execute("INSERT INTO preferences VALUES ('sync_server_url','https://wrong.example/')",[]).unwrap();
         source.execute("INSERT INTO preferences VALUES ('sync_last_etag','wrong')",[]).unwrap();
         source.execute("INSERT INTO preferences VALUES ('skill_directories','[\"/unsafe\"]')",[]).unwrap();
+        source.execute("INSERT INTO preferences VALUES ('provider','codex')",[]).unwrap();
+        source.execute("INSERT INTO preferences VALUES ('model','default')",[]).unwrap();
+        source.execute("INSERT INTO preferences VALUES ('thread:codex:550e8400-e29b-41d4-a716-446655440000:teach','remote-thread')",[]).unwrap();
         drop(source);
         let target=Connection::open(root.join("target.sqlite3")).unwrap();
         migrate(&target).unwrap();
         target.execute("INSERT INTO preferences VALUES ('sync_server_url','https://local.example/')",[]).unwrap();
         target.execute("INSERT INTO preferences VALUES ('sync_last_etag','local-etag')",[]).unwrap();
+        target.execute("INSERT INTO preferences VALUES ('provider','openai')",[]).unwrap();
+        target.execute("INSERT INTO preferences VALUES ('model','gpt-6.1-sol')",[]).unwrap();
         let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None),#[cfg(mobile)] sync_token:Mutex::new(None)};
         assert_eq!(import_backup_file(&state,&source_path,&root).unwrap().goals,1);
         let db=state.db.lock().unwrap();
         let value=|key:&str| db.query_row("SELECT value FROM preferences WHERE key=?1",params![key],|r|r.get::<_,String>(0)).optional().unwrap();
         assert_eq!(value("sync_server_url").as_deref(),Some("https://local.example/"));
-        assert_eq!(value("sync_last_etag").as_deref(),Some("local-etag"));
+        assert_eq!(value("sync_last_etag"),None);
         assert_eq!(value("skill_directories"),None);
+        assert_eq!(value("provider").as_deref(),Some("openai"));
+        assert_eq!(value("model").as_deref(),Some("gpt-6.1-sol"));
+        assert_eq!(value("thread:codex:550e8400-e29b-41d4-a716-446655440000:teach"),None);
         drop(db);
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
