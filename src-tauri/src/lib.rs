@@ -7,7 +7,7 @@ use zeroize::Zeroize;
 mod portable_backup;
 mod sync_client;
 
-struct AppState { db: Mutex<Connection>, startup_error: Option<String>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>> }
+struct AppState { db: Mutex<Connection>, startup_error: Option<String>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>>, #[cfg(mobile)] sync_token: Mutex<Option<String>> }
 
 #[derive(Serialize)]
 struct SkillMetadata { name: String, description: String, source: String }
@@ -41,6 +41,7 @@ fn read_skill_metadata(path: &std::path::Path, source: &str) -> Result<SkillMeta
 }
 
 #[tauri::command]
+#[cfg(not(mobile))]
 fn save_skill_directories(state: State<AppState>, directories: Vec<String>) -> Result<(), String> {
     if directories.len() > 5 { return Err("Можно добавить не более пяти каталогов навыков".into()); }
     let values: Vec<PathBuf> = directories.into_iter().map(|name| {
@@ -56,6 +57,7 @@ fn save_skill_directories(state: State<AppState>, directories: Vec<String>) -> R
 }
 
 #[tauri::command]
+#[cfg(not(mobile))]
 fn list_skills(app: tauri::AppHandle, state: State<AppState>) -> Result<Vec<SkillMetadata>, String> {
     let db = state.db.lock().map_err(|e|e.to_string())?;
     let custom = skill_directories(&db)?;
@@ -74,9 +76,40 @@ fn list_skills(app: tauri::AppHandle, state: State<AppState>) -> Result<Vec<Skil
     Ok(skills)
 }
 
-fn app_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_local_dir().ok_or("No local data directory")?;
-    let dir = base.join("educatio-harness");
+#[tauri::command]
+#[cfg(mobile)]
+fn save_skill_directories(_directories:Vec<String>) -> Result<(),String> {
+    Err("Дополнительные каталоги навыков на телефоне пока не поддерживаются".into())
+}
+
+#[tauri::command]
+#[cfg(mobile)]
+fn list_skills() -> Result<Vec<SkillMetadata>,String> {
+    let built_in=[
+        ("knowledge-probe",include_str!("../../skills/knowledge-probe/SKILL.md")),
+        ("curriculum-planner",include_str!("../../skills/curriculum-planner/SKILL.md")),
+        ("socratic-teacher",include_str!("../../skills/socratic-teacher/SKILL.md")),
+        ("knowledge-extractor",include_str!("../../skills/knowledge-extractor/SKILL.md")),
+        ("knowledge-auditor",include_str!("../../skills/knowledge-auditor/SKILL.md")),
+        ("exercise-generator",include_str!("../../skills/exercise-generator/SKILL.md")),
+        ("answer-evaluator",include_str!("../../skills/answer-evaluator/SKILL.md")),
+    ];
+    built_in.into_iter().map(|(name,content)| {
+        let header=content.strip_prefix("---\n").and_then(|text|text.split_once("\n---").map(|(header,_)|header)).ok_or("Invalid built-in skill")?;
+        let metadata:SkillFrontmatter=serde_yaml::from_str(header).map_err(|e|e.to_string())?;
+        if metadata.name!=name {return Err("Built-in skill name mismatch".into());}
+        Ok(SkillMetadata {name:metadata.name,description:metadata.description,source:"Встроенный".into()})
+    }).collect()
+}
+
+fn app_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(mobile)]
+    let dir = app.path().app_local_data_dir().map_err(|e|e.to_string())?;
+    #[cfg(not(mobile))]
+    let dir = {
+        let _ = app;
+        dirs::data_local_dir().ok_or("No local data directory")?.join("educatio-harness")
+    };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }
@@ -123,8 +156,11 @@ fn resolve_db_path(
     })
 }
 
-fn open_db() -> Result<Connection, String> {
-    let default_dir = app_dir()?;
+fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
+    let default_dir = app_dir(app)?;
+    #[cfg(mobile)]
+    let legacy_path = default_dir.join("legacy-my-harness.sqlite3");
+    #[cfg(not(mobile))]
     let legacy_path = dirs::data_local_dir()
         .ok_or("No local data directory")?
         .join("my-harness/my-harness.sqlite3");
@@ -208,7 +244,7 @@ fn move_data_directory(app: tauri::AppHandle, directory: String) -> Result<(), S
     {
         return Err("Дождитесь завершения запроса к модели".into());
     }
-    let default_dir = app_dir()?;
+    let default_dir = app_dir(&app)?;
     let state = app.state::<AppState>();
     let db = state.db.lock().map_err(|e| e.to_string())?;
     copy_database_to_directory(&db, &PathBuf::from(directory), &default_dir)?;
@@ -255,10 +291,14 @@ fn create_private_file(path: &std::path::Path) -> Result<std::fs::File, String> 
     options.open(path).map_err(|e| e.to_string())
 }
 
-fn decrypted_backup_file(path: &std::path::Path, password: &str) -> Result<PathBuf, String> {
+fn decrypted_backup_file(app: &tauri::AppHandle, path: &std::path::Path, password: &str) -> Result<PathBuf, String> {
     let archive = std::fs::read(path).map_err(|e| e.to_string())?;
-    let mut plaintext = portable_backup::decrypt(&archive, password)?;
-    let temporary = app_dir()?.join(format!(".import-{}.sqlite3", uuid::Uuid::new_v4()));
+    decrypted_backup_bytes(app,&archive,password)
+}
+
+fn decrypted_backup_bytes(app: &tauri::AppHandle, archive:&[u8], password: &str) -> Result<PathBuf, String> {
+    let mut plaintext = portable_backup::decrypt(archive, password)?;
+    let temporary = app_dir(app)?.join(format!(".import-{}.sqlite3", uuid::Uuid::new_v4()));
     let result = (|| {
         use std::io::Write;
         let mut file = create_private_file(&temporary)?;
@@ -325,49 +365,58 @@ fn export_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
 }
 
 #[tauri::command]
-fn export_portable_backup(state: State<AppState>, path: String, password: String) -> Result<BackupInfo, String> {
+fn export_portable_backup(app: tauri::AppHandle, state: State<AppState>, path: String, password: String) -> Result<BackupInfo, String> {
     let destination = portable_backup_path(&path, false)?;
-    let temporary = app_dir()?.join(format!(".export-{}.sqlite3", uuid::Uuid::new_v4()));
+    let (encrypted,info)=encrypted_database(&app,&state,&password)?;
+    use std::io::Write;
+    let mut file = create_private_file(&destination)?;
+    if let Err(error) = file.write_all(&encrypted).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(&destination);
+        return Err(error.to_string());
+    }
+    Ok(info)
+}
+
+fn encrypted_database(app:&tauri::AppHandle,state:&AppState,password:&str) -> Result<(Vec<u8>,BackupInfo),String> {
+    let directory=app_dir(app)?;
+    let source=state.db.lock().map_err(|e|e.to_string())?;
+    encrypted_database_from_connection(&source,&directory,password)
+}
+
+fn encrypted_database_from_connection(source:&Connection,directory:&std::path::Path,password:&str) -> Result<(Vec<u8>,BackupInfo),String> {
+    let temporary = directory.join(format!(".export-{}.sqlite3", uuid::Uuid::new_v4()));
     let result = (|| {
-        let source = state.db.lock().map_err(|e| e.to_string())?;
         drop(create_private_file(&temporary)?);
         let mut copy = Connection::open(&temporary).map_err(|e| e.to_string())?;
-        Backup::new(&source, &mut copy).and_then(|backup| backup.run_to_completion(100, Duration::from_millis(10), None)).map_err(|e| e.to_string())?;
+        Backup::new(source, &mut copy).and_then(|backup| backup.run_to_completion(100, Duration::from_millis(10), None)).map_err(|e| e.to_string())?;
         drop(copy);
-        drop(source);
         let info = inspect_backup_file(&temporary)?;
         let mut plaintext = std::fs::read(&temporary).map_err(|e| e.to_string())?;
-        let encrypted_result = portable_backup::encrypt(&plaintext, &password);
+        let encrypted_result = portable_backup::encrypt(&plaintext, password);
         plaintext.zeroize();
         let encrypted = encrypted_result?;
-        use std::io::Write;
-        let mut file = create_private_file(&destination)?;
-        if let Err(error) = file.write_all(&encrypted).and_then(|_| file.sync_all()) {
-            drop(file);
-            let _ = std::fs::remove_file(&destination);
-            return Err(error.to_string());
-        }
-        Ok(info)
+        Ok((encrypted,info))
     })();
     let _ = std::fs::remove_file(&temporary);
     result
 }
 
 #[tauri::command]
-fn inspect_portable_backup(path: String, password: String) -> Result<BackupInfo, String> {
+fn inspect_portable_backup(app: tauri::AppHandle, path: String, password: String) -> Result<BackupInfo, String> {
     let source = portable_backup_path(&path, true)?;
-    let temporary = decrypted_backup_file(&source, &password)?;
+    let temporary = decrypted_backup_file(&app, &source, &password)?;
     let result = inspect_backup_file(&temporary);
     let _ = std::fs::remove_file(temporary);
     result
 }
 
 #[tauri::command]
-fn import_portable_backup(state: State<AppState>, path: String, password: String) -> Result<BackupInfo, String> {
+fn import_portable_backup(app: tauri::AppHandle, state: State<AppState>, path: String, password: String) -> Result<BackupInfo, String> {
     if !state.runs.lock().map_err(|e| e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
     let source = portable_backup_path(&path, true)?;
-    let temporary = decrypted_backup_file(&source, &password)?;
-    let result = import_backup_file(&state, &temporary, &app_dir()?);
+    let temporary = decrypted_backup_file(&app, &source, &password)?;
+    let result = import_backup_file(&state, &temporary, &app_dir(&app)?);
     let _ = std::fs::remove_file(temporary);
     result
 }
@@ -375,16 +424,44 @@ fn import_portable_backup(state: State<AppState>, path: String, password: String
 fn sync_credentials(state: &AppState) -> Result<(String,String),String> {
     let url: Option<String> = state.db.lock().map_err(|e|e.to_string())?.query_row("SELECT value FROM preferences WHERE key='sync_server_url'",[],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     let url=url.ok_or("Сначала подключите сервер в настройках")?;
-    let token=keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.get_password().map_err(|_|"Токен сервера недоступен в хранилище секретов".to_string())?;
+    let token=saved_sync_token(state)?;
     Ok((url,token))
+}
+
+fn saved_sync_token(state:&AppState) -> Result<String,String> {
+    #[cfg(mobile)]
+    { state.sync_token.lock().map_err(|e|e.to_string())?.clone().ok_or("Токен сервера не сохранён. Введите его снова после запуска приложения".into()) }
+    #[cfg(not(mobile))]
+    { let _=state; keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.get_password().map_err(|_|"Токен сервера недоступен в хранилище секретов".to_string()) }
+}
+
+fn store_sync_token(state:&AppState,token:&str) -> Result<(),String> {
+    #[cfg(mobile)]
+    { *state.sync_token.lock().map_err(|e|e.to_string())?=Some(token.to_owned()); Ok(()) }
+    #[cfg(not(mobile))]
+    { let _=state; keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.set_password(token).map_err(|e|e.to_string()) }
+}
+
+fn clear_sync_token(state:&AppState) -> Result<(),String> {
+    #[cfg(mobile)]
+    { *state.sync_token.lock().map_err(|e|e.to_string())?=None; Ok(()) }
+    #[cfg(not(mobile))]
+    {
+        let _=state;
+        let entry=keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?;
+        match entry.delete_credential() {
+            Ok(())|Err(keyring::Error::NoEntry)=>Ok(()),
+            Err(error)=>Err(format!("Не удалось удалить токен из хранилища секретов: {error}")),
+        }
+    }
 }
 
 #[tauri::command]
 async fn sync_configure(app: tauri::AppHandle, url: String, token: String) -> Result<sync_client::RemoteStatus,String> {
     tauri::async_runtime::spawn_blocking(move || {
         let checked=sync_client::status(&url,&token)?;
-        keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.set_password(&token).map_err(|e|e.to_string())?;
         let state=app.state::<AppState>();
+        store_sync_token(&state,&token)?;
         let mut db=state.db.lock().map_err(|e|e.to_string())?;
         let transaction=db.transaction().map_err(|e|e.to_string())?;
         transaction.execute("DELETE FROM preferences WHERE key='sync_last_etag'",[]).map_err(|e|e.to_string())?;
@@ -404,11 +481,7 @@ async fn sync_status(app: tauri::AppHandle) -> Result<sync_client::RemoteStatus,
 
 #[tauri::command]
 fn sync_disconnect(state: State<AppState>) -> Result<(),String> {
-    let entry=keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?;
-    match entry.delete_credential() {
-        Ok(())|Err(keyring::Error::NoEntry)=>{},
-        Err(error)=>return Err(format!("Не удалось удалить токен из хранилища секретов: {error}")),
-    }
+    clear_sync_token(&state)?;
     state.db.lock().map_err(|e|e.to_string())?.execute("DELETE FROM preferences WHERE key IN ('sync_server_url','sync_last_etag')",[]).map_err(|e|e.to_string())?;
     Ok(())
 }
@@ -417,7 +490,7 @@ fn sync_disconnect(state: State<AppState>) -> Result<(),String> {
 async fn sync_upload(app: tauri::AppHandle, path: String, password: String) -> Result<(),String> {
     tauri::async_runtime::spawn_blocking(move || {
         let archive_path=portable_backup_path(&path,true)?;
-        let decrypted=decrypted_backup_file(&archive_path,&password)?;
+        let decrypted=decrypted_backup_file(&app,&archive_path,&password)?;
         std::fs::remove_file(decrypted).map_err(|e|format!("Не удалось удалить временную расшифрованную копию: {e}"))?;
         let archive=std::fs::read(&archive_path).map_err(|e|e.to_string())?;
         let state=app.state::<AppState>();
@@ -447,10 +520,40 @@ async fn sync_download(app: tauri::AppHandle, path: String) -> Result<(),String>
 }
 
 #[tauri::command]
-fn import_backup(state: State<AppState>, path: String) -> Result<BackupInfo, String> {
+async fn sync_upload_current(app:tauri::AppHandle,password:String) -> Result<BackupInfo,String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state=app.state::<AppState>();
+        if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() {return Err("Дождитесь завершения запроса к модели".into());}
+        let (url,token)=sync_credentials(&state)?;
+        let known:Option<String>=state.db.lock().map_err(|e|e.to_string())?.query_row("SELECT value FROM preferences WHERE key='sync_last_etag'",[],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let (archive,info)=encrypted_database(&app,&state,&password)?;
+        let updated=sync_client::upload(&url,&token,archive,known.as_deref())?;
+        state.db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_last_etag',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![updated]).map_err(|e|e.to_string())?;
+        Ok(info)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+async fn sync_import_current(app:tauri::AppHandle,password:String) -> Result<BackupInfo,String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state=app.state::<AppState>();
+        if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() {return Err("Дождитесь завершения запроса к модели".into());}
+        let (url,token)=sync_credentials(&state)?;
+        let (archive,etag)=sync_client::download(&url,&token)?;
+        let temporary=decrypted_backup_bytes(&app,&archive,&password)?;
+        let result=import_backup_file(&state,&temporary,&app_dir(&app)?);
+        let _=std::fs::remove_file(&temporary);
+        let info=result?;
+        state.db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_last_etag',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![etag]).map_err(|e|e.to_string())?;
+        Ok(info)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+fn import_backup(app: tauri::AppHandle, state: State<AppState>, path: String) -> Result<BackupInfo, String> {
     if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
     let source_path = backup_path(&path,true)?;
-    import_backup_file(&state, &source_path, &app_dir()?)
+    import_backup_file(&state, &source_path, &app_dir(&app)?)
 }
 
 fn import_backup_file(state: &AppState, source_path: &std::path::Path, safety_dir: &std::path::Path) -> Result<BackupInfo, String> {
@@ -681,6 +784,7 @@ fn cached_api_key_status<F: FnOnce() -> bool>(cache: &Mutex<Option<(bool, Instan
     value
 }
 
+#[cfg(not(mobile))]
 fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
     let filename = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
     let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join(&filename);
@@ -691,6 +795,7 @@ fn bundled_binary(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String>
 }
 
 #[tauri::command]
+#[cfg(not(mobile))]
 fn auth_status(app: tauri::AppHandle, state: State<AppState>) -> AuthStatus {
     let status = bundled_binary(&app, "educatioharness-codex").and_then(|path| Command::new(path).args(["login","status"]).output().map_err(|e|e.to_string()));
     let (installed, authenticated, detail) = match status {
@@ -710,18 +815,35 @@ fn auth_status(app: tauri::AppHandle, state: State<AppState>) -> AuthStatus {
 }
 
 #[tauri::command]
+#[cfg(mobile)]
+fn auth_status(state: State<AppState>) -> AuthStatus {
+    AuthStatus { codex_installed:false, codex_authenticated:false, api_key_saved:false, server_configured:sync_credentials(&state).is_ok(), detail:"На телефоне доступен AI через свой сервер. Токен нужно вводить после каждого запуска.".into() }
+}
+
+#[tauri::command]
+#[cfg(not(mobile))]
 fn codex_login(app: tauri::AppHandle) -> Result<(), String> {
     Command::new(bundled_binary(&app,"educatioharness-codex")?).arg("login").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
+#[cfg(not(mobile))]
 fn codex_logout(app: tauri::AppHandle) -> Result<(), String> {
     let result = Command::new(bundled_binary(&app,"educatioharness-codex")?).arg("logout").output().map_err(|e| e.to_string())?;
     if result.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&result.stderr).to_string()) }
 }
 
 #[tauri::command]
+#[cfg(mobile)]
+fn codex_login() -> Result<(),String> { Err("Вход через Codex CLI доступен только на компьютере. На телефоне подключите свой сервер.".into()) }
+
+#[tauri::command]
+#[cfg(mobile)]
+fn codex_logout() -> Result<(),String> { Err("Codex CLI недоступен на телефоне".into()) }
+
+#[tauri::command]
+#[cfg(not(mobile))]
 async fn save_api_key(app: tauri::AppHandle, key: String, model: String) -> Result<(), String> {
     if !key.starts_with("sk-") || key.len() > 512 { return Err("Введите корректный ключ OpenAI API".into()); }
     let request = AgentRequest { request_id: uuid::Uuid::new_v4().to_string(), operation: "validate".into(), provider: "openai".into(), model, input: json!({"question":"Проверь подключение"}), skill: String::new(), session_id: None };
@@ -733,11 +855,20 @@ async fn save_api_key(app: tauri::AppHandle, key: String, model: String) -> Resu
 }
 
 #[tauri::command]
+#[cfg(not(mobile))]
 fn remove_api_key(state: State<AppState>) -> Result<(), String> {
     keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e| e.to_string())?.delete_credential().map_err(|e|e.to_string())?;
     *state.api_key_saved.lock().map_err(|e|e.to_string())? = Some((false,Instant::now()));
     Ok(())
 }
+
+#[tauri::command]
+#[cfg(mobile)]
+fn save_api_key(_key:String,_model:String) -> Result<(),String> { Err("Ключ OpenAI API на телефоне не хранится. Используйте свой сервер.".into()) }
+
+#[tauri::command]
+#[cfg(mobile)]
+fn remove_api_key() -> Result<(),String> { Err("Ключ OpenAI API на телефоне не хранится".into()) }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -797,28 +928,43 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
     execute_agent(app, request, None).await
 }
 
-async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_override: Option<String>) -> Result<Value, String> {
+fn validate_agent_request(request:&AgentRequest) -> Result<(),String> {
     if request.request_id.len() > 64 || request.request_id.is_empty() || !request.request_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { return Err("Invalid request ID".into()); }
     if !["probe","evaluate_probe","curriculum","teach","practice","evaluate_practice","extract","audit","validate"].contains(&request.operation.as_str()) { return Err("Invalid operation".into()); }
     if !["codex","openai","server"].contains(&request.provider.as_str()) { return Err("Invalid provider".into()); }
     if request.model.len() > 100 || request.skill.len() > 80 || request.input.to_string().len() > 200_000 { return Err("Request too large".into()); }
-    if request.provider == "server" {
-        let (url,token)=sync_credentials(&app.state::<AppState>())?;
-        let payload=json!({"operation":request.operation,"model":request.model,"input":request.input,"sessionId":request.session_id});
-        let runs=app.state::<AppState>().runs.clone();
-        let cancelled=Arc::new(AtomicBool::new(false));
-        {
-            let mut active=runs.lock().map_err(|e|e.to_string())?;
-            if active.contains_key(&request.request_id) {return Err("Request ID is already active".into());}
-            active.insert(request.request_id.clone(),cancelled.clone());
-        }
-        let outcome=tokio::select! {
-            result=sync_client::agent(&url,&token,&payload)=>result,
-            _=async {loop {if cancelled.load(Ordering::Relaxed) {break;} tokio::time::sleep(Duration::from_millis(100)).await;}}=>Err("Запрос отменён".into()),
-        };
-        runs.lock().map_err(|e|e.to_string())?.remove(&request.request_id);
-        return outcome;
+    Ok(())
+}
+
+async fn execute_server_agent(app:tauri::AppHandle,request:AgentRequest) -> Result<Value,String> {
+    let (url,token)=sync_credentials(&app.state::<AppState>())?;
+    let payload=json!({"operation":request.operation,"model":request.model,"input":request.input,"sessionId":request.session_id});
+    let runs=app.state::<AppState>().runs.clone();
+    let cancelled=Arc::new(AtomicBool::new(false));
+    {
+        let mut active=runs.lock().map_err(|e|e.to_string())?;
+        if active.contains_key(&request.request_id) {return Err("Request ID is already active".into());}
+        active.insert(request.request_id.clone(),cancelled.clone());
     }
+    let outcome=tokio::select! {
+        result=sync_client::agent(&url,&token,&payload)=>result,
+        _=async {loop {if cancelled.load(Ordering::Relaxed) {break;} tokio::time::sleep(Duration::from_millis(100)).await;}}=>Err("Запрос отменён".into()),
+    };
+    runs.lock().map_err(|e|e.to_string())?.remove(&request.request_id);
+    outcome
+}
+
+#[cfg(mobile)]
+async fn execute_agent(app:tauri::AppHandle,request:AgentRequest,_key_override:Option<String>) -> Result<Value,String> {
+    validate_agent_request(&request)?;
+    if request.provider!="server" {return Err("На телефоне доступен только провайдер «Свой сервер»".into());}
+    execute_server_agent(app,request).await
+}
+
+#[cfg(not(mobile))]
+async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_override: Option<String>) -> Result<Value, String> {
+    validate_agent_request(&request)?;
+    if request.provider == "server" {return execute_server_agent(app,request).await;}
     let key = if request.provider == "openai" { Some(match key_override { Some(candidate) => candidate, None => keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e|e.to_string())?.get_password().map_err(|_|"No API key saved".to_string())? }) } else { None };
     let resource = app.path().resource_dir().map_err(|e|e.to_string())?;
     let bundled = resource.join("agent-runtime/main.mjs");
@@ -832,7 +978,7 @@ async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_overrid
         let db = state.db.lock().map_err(|e|e.to_string())?;
         skill_directories(&db)?
     };
-    let agent_workspace = app_dir()?.join("agent-workspace");
+    let agent_workspace = app_dir(&app)?.join("agent-workspace");
     std::fs::create_dir_all(&agent_workspace).map_err(|e|e.to_string())?;
     let payload = json!({"operation":request.operation,"provider":request.provider,"model":request.model,"input":request.input,"skill":request.skill,"skillDirectories":extra_skills,"sessionId":request.session_id});
     let runs = app.state::<AppState>().runs.clone();
@@ -873,15 +1019,19 @@ async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_overrid
     work?
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg_attr(all(mobile,any(target_os="android",target_os="ios")), tauri::mobile_entry_point)]
 pub fn run() {
-    let (db,startup_error)=match open_db() {
-        Ok(db)=>(db,None),
-        Err(error)=>(Connection::open_in_memory().expect("Cannot create error state"),Some(error)),
-    };
-    tauri::Builder::default().manage(AppState { db: Mutex::new(db), startup_error, runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
+    tauri::Builder::default()
+        .setup(|app| {
+            let (db,startup_error)=match open_db(app.handle()) {
+                Ok(db)=>(db,None),
+                Err(error)=>(Connection::open_in_memory().expect("Cannot create error state"),Some(error)),
+            };
+            app.manage(AppState { db: Mutex::new(db), startup_error, runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None), #[cfg(mobile)] sync_token: Mutex::new(None) });
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_portable_backup,inspect_portable_backup,import_portable_backup,sync_configure,sync_status,sync_disconnect,sync_upload,sync_download,export_obsidian])
+        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_portable_backup,inspect_portable_backup,import_portable_backup,sync_configure,sync_status,sync_disconnect,sync_upload,sync_download,sync_upload_current,sync_import_current,export_obsidian])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<AppState>();
@@ -1157,6 +1307,22 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn current_database_can_be_encrypted_for_server_transfer() {
+        let root=std::env::temp_dir().join(format!("educatio-current-transfer-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source=Connection::open_in_memory().unwrap();
+        migrate(&source).unwrap();
+        source.execute("INSERT INTO learning_goals VALUES ('goal','Изучить C','now','now')",[]).unwrap();
+        let (archive,info)=encrypted_database_from_connection(&source,&root,"long secret phrase").unwrap();
+        assert_eq!(info.goals,1);
+        assert!(archive.starts_with(b"EDUHBA01"));
+        assert!(portable_backup::decrypt(&archive,"wrong secret phrase").is_err());
+        let restored=root.join("restored.sqlite3");
+        std::fs::write(&restored,portable_backup::decrypt(&archive,"long secret phrase").unwrap()).unwrap();
+        assert_eq!(inspect_backup_file(&restored).unwrap().goals,1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn imported_learning_data_keeps_local_sync_connection_and_discards_remote_settings() {
         let root=std::env::temp_dir().join(format!("educatio-import-sync-{}",uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -1172,7 +1338,7 @@ mod tests {
         migrate(&target).unwrap();
         target.execute("INSERT INTO preferences VALUES ('sync_server_url','https://local.example/')",[]).unwrap();
         target.execute("INSERT INTO preferences VALUES ('sync_last_etag','local-etag')",[]).unwrap();
-        let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None)};
+        let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None),#[cfg(mobile)] sync_token:Mutex::new(None)};
         assert_eq!(import_backup_file(&state,&source_path,&root).unwrap().goals,1);
         let db=state.db.lock().unwrap();
         let value=|key:&str| db.query_row("SELECT value FROM preferences WHERE key=?1",params![key],|r|r.get::<_,String>(0)).optional().unwrap();

@@ -7,6 +7,8 @@ body,.main{background:#111}
 .cancel-agent{position:absolute;right:19px;bottom:18px;z-index:19;background:#262626;color:#ccc;border:1px solid #555;border-radius:6px;padding:8px 11px;font-size:11px}
 .agent-progress{position:absolute;right:19px;bottom:58px;z-index:19;background:#202320;color:#b9c9b6;border:1px solid #445044;border-radius:6px;padding:7px 10px;font-size:10px}
 .skill-settings{grid-column:1/-1}
+.desktop-settings{display:contents}
+.desktop-settings[hidden]{display:none}
 .skill-settings textarea{min-height:66px;margin:8px 0 12px}
 .skill-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin:18px 0 22px}
 .skill-list>div{border:1px solid #373737;border-radius:7px;padding:10px 12px;background:#1c1c1c}
