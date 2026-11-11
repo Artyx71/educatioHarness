@@ -1,0 +1,57 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+      - name: Install Android platform, tools and NDK
+        run: |
+          sdkmanager 'platforms;android-37' 'build-tools;36.0.0' 'ndk;29.0.14206865'
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
+          echo "$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Build universal debug APK
+        run: npx tauri android build --debug --apk -t aarch64 x86_64 --ci
+      - name: Inspect mobile package
+        run: |
+          APK=src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | head -1
+          unzip -Z1 "$APK" | rg '^lib/arm64-v8a/libeducatio_harness_lib\.so$'
+          unzip -Z1 "$APK" | rg '^lib/x86_64/libeducatio_harness_lib\.so$'
+          if unzip -Z1 "$APK" | rg -i 'educatioharness-node|educatioharness-codex|agent-runtime/main\.mjs'; then
+            echo 'Desktop agent sidecar leaked into Android package' >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: educatioHarness-android-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          if-no-files-found: error
+          retention-days: 7
