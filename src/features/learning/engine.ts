@@ -171,7 +171,10 @@ export async function teach(goalId:string,sessionId:string,topic:Topic,config:Co
   const recordedClaims=snap.knowledge_nodes.filter(item=>item.goal_id===goalId&&item.kind==='proposition').slice(-20).map(item=>item.statement);
   await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''},null,'',sessionId);
   let result:AgentResult<Teaching>;
-  try { result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:parseStringList(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId); }
+  try {
+    result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:parseStringList(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId);
+    if(result.topicId!==topic.id) throw new Error('Ответ учителя относится к другой теме. Повторите запрос.');
+  }
   catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e),sessionId); throw e; }
   const text=`${result.message}\n\n**${result.questionType==='predict'?'Предположите':'Проверьте понимание'}:** ${result.question}`;
   const created=await message(sessionId,'assistant',text,'teaching');
@@ -207,6 +210,7 @@ export async function generateExercise(goalId:string,topic:Topic,config:Config,f
   const selectedConfig=format==='retrieval_card'&&!config.skillOverrides?.practice
     ? {...config,skillOverrides:{...config.skillOverrides,practice:'retrieval-review'}} : config;
   const result=await call<Practice>(selectedConfig,'practice',{goal:goal.title,topic,attempts,format});
+  if(result.topicId!==topic.id) throw new Error('Задание относится к другой теме. Создайте его ещё раз.');
   const exercise={id:id(),goal_id:goalId,topic_id:topic.id,kind:result.kind,prompt:result.prompt,solution:result.solution,created_at:now()};
   await api.save('exercises',exercise); return exercise;
 }

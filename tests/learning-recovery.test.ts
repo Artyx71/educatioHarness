@@ -164,6 +164,22 @@ describe('learning workflow recovery', () => {
     expect(input.attempts.map((item:{answer:string})=>item.answer)).toEqual(['Нужный ответ']);
   });
 
+  it('rejects a lesson or exercise assigned by the model to another topic', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:curriculum',status:'completed'} as Snapshot['workflow_executions'][number]);
+    const topic={id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0};
+    fake.agent.mockResolvedValue({message:'Обсудим другой материал.',question:'Что вы знаете?',questionType:'check',topicId:'other',phase:'teach',_execution:{durationMs:1}});
+    await expect(teach('goal','session',topic,{provider:'codex',model:'default'})).rejects.toThrow('другой теме');
+    expect(fake.save.mock.calls.filter(([table,record])=>table==='messages'&&record.role==='assistant')).toHaveLength(0);
+    expect(fake.save).toHaveBeenCalledWith('workflow_executions',expect.objectContaining({step_id:'teach',status:'failed'}));
+    vi.clearAllMocks();
+    fake.snapshot.mockResolvedValue(snapshot);
+    fake.save.mockResolvedValue(undefined);
+    fake.agent.mockResolvedValue({kind:'reasoning',prompt:'Задание по другой теме',solution:'Ответ',topicId:'other',_execution:{durationMs:1}});
+    await expect(generateExercise('goal',topic,{provider:'codex',model:'default'})).rejects.toThrow('другой теме');
+    expect(fake.save.mock.calls.filter(([table])=>table==='exercises')).toHaveLength(0);
+  });
+
   it('uses the retrieval skill for cards unless the learner selected a custom skill', async () => {
     fake.agent.mockResolvedValue({kind:'short_answer',prompt:'Вспомните указатели',solution:'Адрес',topicId:'topic',_execution:{durationMs:1}});
     const topic={id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'Адреса памяти',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0};
