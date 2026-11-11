@@ -15,7 +15,7 @@ const codexTriple = process.platform === 'linux' ? `${architecture === 'arm64' ?
 const codexSource = resolve(root,`node_modules/@openai/codex-${platformPackage}-${architecture}/vendor/${codexTriple}/bin/codex${extension}`);
 await access(codexSource).catch(() => { throw new Error(`Official Codex binary missing: ${codexSource}. Run npm ci with optional dependencies.`); });
 await mkdir(resolve(root,'agent-runtime/bundle'),{recursive:true});
-await build({entryPoints:[resolve(root,'agent-runtime/dist/main.js')],outfile:resolve(root,'agent-runtime/bundle/main.mjs'),bundle:true,platform:'node',format:'esm',target:'node22',external:['@openai/codex-linux-x64','@openai/codex-linux-arm64','@openai/codex-darwin-x64','@openai/codex-darwin-arm64','@openai/codex-windows-x64','@openai/codex-windows-arm64'],define:{'process.env.NODE_ENV':'"production"'}});
+await build({entryPoints:[resolve(root,'agent-runtime/dist/main.js')],outfile:resolve(root,'agent-runtime/bundle/main.mjs'),bundle:true,platform:'node',format:'esm',target:'node22',external:['@openai/codex-linux-x64','@openai/codex-linux-arm64','@openai/codex-darwin-x64','@openai/codex-darwin-arm64','@openai/codex-win32-x64','@openai/codex-win32-arm64'],define:{'process.env.NODE_ENV':'"production"'}});
 const binary = resolve(root,`src-tauri/binaries/educatioharness-node-${triple}${extension}`);
 const codexBinary = resolve(root,`src-tauri/binaries/educatioharness-codex-${triple}${extension}`);
 await mkdir(resolve(root,'src-tauri/binaries'),{recursive:true});
