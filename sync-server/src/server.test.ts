@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {randomBytes} from 'node:crypto';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
@@ -18,6 +18,8 @@ test('encrypted archive relay authenticates and prevents stale overwrites',async
   try {
     assert.equal((await fetch(url)).status,401);
     assert.equal((await fetch(url,{headers:{authorization:'Bearer invalid'}})).status,401);
+    assert.equal((await fetch(url.replace('/v1/archive','/v1/agent'),{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).status,401);
+    assert.equal((await fetch(url.replace('/v1/archive','/v1/agent'),{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:'{}'})).status,503);
     assert.equal((await fetch(url,{headers:{authorization:`Bearer ${token}`}})).status,404);
     const headers={authorization:`Bearer ${token}`,'if-none-match':'*'};
     const firstUpload=await fetch(url,{method:'PUT',headers,body:archive});
@@ -40,6 +42,28 @@ test('encrypted archive relay authenticates and prevents stale overwrites',async
     const competing=await Promise.all([1,2].map(()=>fetch(url,{method:'PUT',headers:{authorization:`Bearer ${token}`,'if-match':currentTag},body:Buffer.concat([Buffer.from('EDUHBA01'),randomBytes(44)])})));
     assert.equal(competing.filter(result=>result.status===200).length,1);
     assert.equal(competing.filter(result=>result.status===409||result.status===412).length,1);
+  } finally {
+    await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('agent endpoint requires token and returns an actionable regional error',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'educatio-agent-test-'));
+  const token=randomBytes(32).toString('hex');
+  const runtimePath=join(directory,'agent.mjs');
+  await writeFile(runtimePath,"process.stdout.write(JSON.stringify({type:'result',ok:false,error:'403 Country, region, or territory not supported'})+'\\n')");
+  const server=createSyncServer(directory,token,{apiKey:'test-key',runtimePath,skillsDir:directory});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();
+  assert(address&&typeof address==='object');
+  const url=`http://127.0.0.1:${address.port}/v1/agent`;
+  const body=JSON.stringify({operation:'probe',model:'gpt-6-luna',input:{goal:'C'}});
+  try {
+    assert.equal((await fetch(url,{method:'POST',body})).status,401);
+    const response=await fetch(url,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body});
+    assert.equal(response.status,403);
+    assert.match((await response.json() as {error:string}).error,/регионе сервера/);
   } finally {
     await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     await rm(directory,{recursive:true,force:true});

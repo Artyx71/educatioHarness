@@ -15,8 +15,8 @@
     "desktop:build:rpm": "npm run runtime:bundle && npm run build && tauri build --bundles rpm",
     "runtime:bundle": "npm run runtime:build && node scripts/prepare-sidecar.mjs",
     "sync-server:build": "tsc -p sync-server/tsconfig.json",
-    "sync-server:start": "npm run sync-server:build && node sync-server/dist/server.js",
-    "sync-server:test": "npm run sync-server:build && node --test sync-server/dist/server.test.js"
+    "sync-server:start": "npm run runtime:build && npm run sync-server:build && node sync-server/dist/server.js",
+    "sync-server:test": "npm run sync-server:build && node --test sync-server/dist/server.test.js sync-server/dist/agent.test.js"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",
