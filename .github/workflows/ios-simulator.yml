@@ -38,6 +38,8 @@ jobs:
           xcrun simctl io "$SIMULATOR" screenshot "$RUNNER_TEMP/educatio-ios-first-launch.png"
           sleep 35
           xcrun simctl io "$SIMULATOR" screenshot "$RUNNER_TEMP/educatio-ios-after-load.png"
+      - name: Reject blank app screen
+        run: swift scripts/check-ios-screenshot.swift "$RUNNER_TEMP/educatio-ios-after-load.png"
       - uses: actions/upload-artifact@v4
         with:
           name: educatioHarness-ios-simulator
