@@ -58,18 +58,42 @@ export async function executeAgent(raw:unknown,config:AgentConfig,signal?:AbortS
       cwd:config.provider==='codex'?config.workspaceDir:config.skillsDir,
       env,
       stdio:['pipe','pipe','pipe'],
+      detached:process.platform!=='win32',
+      windowsHide:true,
     });
     let output='';let stderr='';let settled=false;
+    let terminationError:Error|undefined;
+    let terminationTask:Promise<void>|undefined;
     const finish=(error?:Error,value?:unknown)=>{if(settled)return;settled=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);if(error)reject(error);else resolve(value)};
-    const abort=()=>{child.kill();finish(new Error('Agent request cancelled'))};
-    const timer=setTimeout(()=>{child.kill();finish(new Error('Agent request timed out'))},180_000);
+    // The runtime may launch Codex itself. Cancellation must stop that whole tree
+    // and keep the server slot occupied until shutdown has actually finished.
+    const terminate=(error:Error)=>{
+      if(terminationError||settled)return;
+      terminationError=error;
+      clearTimeout(timer);
+      if(!child.pid)return;
+      if(process.platform==='win32') {
+        terminationTask=new Promise<void>(done=>{
+          const killer=spawn('taskkill',['/PID',String(child.pid),'/T','/F'],{stdio:'ignore',windowsHide:true});
+          killer.on('error',()=>{child.kill();done()});
+          killer.on('close',code=>{if(code!==0)child.kill();done()});
+        });
+      } else {
+        try {process.kill(-child.pid,'SIGKILL')} catch {child.kill('SIGKILL')}
+      }
+    };
+    const abort=()=>terminate(new Error('Agent request cancelled'));
+    const timer=setTimeout(()=>terminate(new Error('Agent request timed out')),180_000);
     signal?.addEventListener('abort',abort,{once:true});
     if(signal?.aborted){abort();return}
     child.on('error',error=>finish(new Error(`Cannot start agent runtime: ${error.message}`)));
-    child.stdout.on('data',(chunk:Buffer)=>{output+=chunk.toString('utf8');if(output.length>2_000_000){child.kill();finish(new Error('Agent output exceeded limit'))}});
+    child.stdin.on('error',()=>{/* The runtime may exit before consuming stdin; close reports the actual failure. */});
+    child.stdout.on('data',(chunk:Buffer)=>{if(terminationError)return;output+=chunk.toString('utf8');if(output.length>2_000_000)terminate(new Error('Agent output exceeded limit'))});
     child.stderr.on('data',(chunk:Buffer)=>{stderr=(stderr+chunk.toString('utf8')).slice(-4000)});
-    child.on('close',()=>{
+    child.on('close',async()=>{
       if(settled)return;
+      if(terminationTask) await terminationTask;
+      if(terminationError){finish(terminationError);return}
       const line=output.split('\n').reverse().find(part=>part.includes('"type":"result"'));
       if(!line){finish(new Error(`Agent runtime returned no result${stderr?': '+stderr.slice(0,300):''}`));return}
       try {

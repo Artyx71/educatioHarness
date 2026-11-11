@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {test} from 'node:test';
@@ -37,4 +37,33 @@ test('model errors distinguish server region from rejected key',()=>{
   assert.match(classifyAgentFailure('401 Unauthorized','codex').error,/codex login status/);
   assert.equal(classifyAgentFailure('Agent request timed out').status,504);
   assert.equal(classifyAgentFailure('Bearer sk-secret').error.includes('sk-secret'),false);
+});
+
+test('cancelling an agent waits for shutdown and stops its child process',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'educatio-agent-cancel-'));
+  const runtimePath=join(directory,'agent.mjs');
+  const pidPath=join(directory,'pids.json');
+  await writeFile(runtimePath,`import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(${JSON.stringify(pidPath)},JSON.stringify({runtime:process.pid,child:child.pid}));setInterval(()=>{},1000)`);
+  const controller=new AbortController();
+  let pids:{runtime:number;child:number}|undefined;
+  try {
+    const running=executeAgent({operation:'probe',model:'default',input:{}},{provider:'openai',apiKey:'test-key',runtimePath,skillsDir:directory},controller.signal);
+    for(let attempt=0;attempt<100;attempt++) {
+      try {pids=JSON.parse(await readFile(pidPath,'utf8')) as {runtime:number;child:number};break}
+      catch {await new Promise(resolve=>setTimeout(resolve,20))}
+    }
+    assert(pids,'agent runtime did not start');
+    controller.abort();
+    await assert.rejects(running,/cancelled/);
+    assert.throws(()=>process.kill(pids!.runtime,0),{code:'ESRCH'});
+    if(process.platform==='linux') {
+      // A killed grandchild may briefly be a zombie until the init process reaps it.
+      const state=await readFile(`/proc/${pids.child}/stat`,'utf8').then(raw=>raw.split(') ')[1]?.[0],()=>undefined);
+      assert(state===undefined||state==='Z',`agent descendant is still running: ${state}`);
+    }
+  } finally {
+    controller.abort();
+    if(pids) {try {process.kill(pids.child,'SIGKILL')} catch {/* already stopped */}}
+    await rm(directory,{recursive:true,force:true});
+  }
 });
