@@ -156,7 +156,7 @@ select:disabled{-webkit-text-fill-color:var(--field-text);background-color:var(-
 @media(max-width:800px){.topic-dashboard,.activity-dashboard,.review-prompt,.retained-goal{width:min(390px,calc(100vw - 220px))}.answer-toolbar span:last-child{display:none}}
 .mobile-nav,.mobile-plan-button,.mobile-plan-backdrop,.mobile-plan-close{display:none}
 @media(max-width:640px){
-  .app{height:100dvh;flex-direction:column}
+  .app{height:100dvh;flex-direction:column;padding-top:env(safe-area-inset-top);background:#111}
   .ref-sidebar{display:none}
   .main{flex:1;min-height:0;width:100%}
   .agent-activity{bottom:13px;max-width:calc(100% - 22px)}.main:has(.learn-page) .agent-activity{bottom:145px}.main:has(.reference-home) .agent-activity{bottom:142px}
