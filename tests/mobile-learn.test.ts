@@ -27,4 +27,14 @@ describe('narrow learning shell',()=>{
     snap.workflow_executions[0].status='failed';
     expect(renderToStaticMarkup(createElement(Learn,props))).toContain('Продолжить: Указатели');
   });
+  it('shows a retry action for interrupted knowledge extraction',()=>{
+    const topic={id:'pointers',curriculum_id:'plan',title:'Указатели',description:'',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'in_progress',position:0};
+    const snap={
+      learning_goals:[{id:'goal',title:'Изучить C'}],sessions:[],diagnostic_answers:[],messages:[],
+      workflow_executions:[{id:'message:extract',goal_id:'goal',session_id:'session',step_id:'extract',status:'running',input:'{}'}],
+    } as unknown as Snapshot;
+    const html=renderToStaticMarkup(createElement(Learn,{snap,goalId:'goal',sessionId:'session',topics:[topic],topic,config:{provider:'codex',model:'default'},busy:'',run:()=>{},onGoal:()=>{},onTopic:()=>{}}));
+    expect(html).toContain('Граф знаний не обновился');
+    expect(html).toContain('Повторить извлечение');
+  });
 });
