@@ -7,13 +7,16 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "test": "npm run runtime:build && vitest run",
+    "test": "npm run runtime:build && vitest run && npm run sync-server:test",
     "tauri": "tauri",
     "runtime:build": "tsc -p agent-runtime/tsconfig.json",
     "runtime:dev": "npm run runtime:build",
     "desktop:build": "npm run runtime:bundle && npm run build && tauri build",
     "desktop:build:rpm": "npm run runtime:bundle && npm run build && tauri build --bundles rpm",
-    "runtime:bundle": "npm run runtime:build && node scripts/prepare-sidecar.mjs"
+    "runtime:bundle": "npm run runtime:build && node scripts/prepare-sidecar.mjs",
+    "sync-server:build": "tsc -p sync-server/tsconfig.json",
+    "sync-server:start": "npm run sync-server:build && node sync-server/dist/server.js",
+    "sync-server:test": "npm run sync-server:build && node --test sync-server/dist/server.test.js"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",

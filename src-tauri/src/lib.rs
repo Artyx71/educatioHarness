@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, io::{BufRead, BufReader, Read, Write}, path::PathBuf, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use tauri::{Emitter, Manager, State};
+use zeroize::Zeroize;
 mod portable_backup;
+mod sync_client;
 
 struct AppState { db: Mutex<Connection>, startup_error: Option<String>, runs: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>, api_key_saved: Mutex<Option<(bool, Instant)>> }
 
@@ -255,7 +257,7 @@ fn create_private_file(path: &std::path::Path) -> Result<std::fs::File, String> 
 
 fn decrypted_backup_file(path: &std::path::Path, password: &str) -> Result<PathBuf, String> {
     let archive = std::fs::read(path).map_err(|e| e.to_string())?;
-    let plaintext = portable_backup::decrypt(&archive, password)?;
+    let mut plaintext = portable_backup::decrypt(&archive, password)?;
     let temporary = app_dir()?.join(format!(".import-{}.sqlite3", uuid::Uuid::new_v4()));
     let result = (|| {
         use std::io::Write;
@@ -265,6 +267,7 @@ fn decrypted_backup_file(path: &std::path::Path, password: &str) -> Result<PathB
         inspect_backup_file(&temporary)?;
         Ok(temporary.clone())
     })();
+    plaintext.zeroize();
     if result.is_err() { let _ = std::fs::remove_file(&temporary); }
     result
 }
@@ -333,8 +336,10 @@ fn export_portable_backup(state: State<AppState>, path: String, password: String
         drop(copy);
         drop(source);
         let info = inspect_backup_file(&temporary)?;
-        let plaintext = std::fs::read(&temporary).map_err(|e| e.to_string())?;
-        let encrypted = portable_backup::encrypt(&plaintext, &password)?;
+        let mut plaintext = std::fs::read(&temporary).map_err(|e| e.to_string())?;
+        let encrypted_result = portable_backup::encrypt(&plaintext, &password);
+        plaintext.zeroize();
+        let encrypted = encrypted_result?;
         use std::io::Write;
         let mut file = create_private_file(&destination)?;
         if let Err(error) = file.write_all(&encrypted).and_then(|_| file.sync_all()) {
@@ -365,6 +370,70 @@ fn import_portable_backup(state: State<AppState>, path: String, password: String
     let result = import_backup_file(&state, &temporary);
     let _ = std::fs::remove_file(temporary);
     result
+}
+
+fn sync_credentials(state: &AppState) -> Result<(String,String),String> {
+    let url: Option<String> = state.db.lock().map_err(|e|e.to_string())?.query_row("SELECT value FROM preferences WHERE key='sync_server_url'",[],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    let url=url.ok_or("Сначала подключите сервер в настройках")?;
+    let token=keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.get_password().map_err(|_|"Токен сервера недоступен в хранилище секретов".to_string())?;
+    Ok((url,token))
+}
+
+#[tauri::command]
+async fn sync_configure(app: tauri::AppHandle, url: String, token: String) -> Result<sync_client::RemoteStatus,String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let checked=sync_client::status(&url,&token)?;
+        keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.set_password(&token).map_err(|e|e.to_string())?;
+        app.state::<AppState>().db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_server_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![url]).map_err(|e|e.to_string())?;
+        Ok(checked)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+async fn sync_status(app: tauri::AppHandle) -> Result<sync_client::RemoteStatus,String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (url,token)=sync_credentials(&app.state::<AppState>())?;
+        sync_client::status(&url,&token)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+fn sync_disconnect(state: State<AppState>) -> Result<(),String> {
+    let entry=keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?;
+    match entry.delete_credential() {
+        Ok(())|Err(keyring::Error::NoEntry)=>{},
+        Err(error)=>return Err(format!("Не удалось удалить токен из хранилища секретов: {error}")),
+    }
+    state.db.lock().map_err(|e|e.to_string())?.execute("DELETE FROM preferences WHERE key='sync_server_url'",[]).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn sync_upload(app: tauri::AppHandle, path: String, password: String) -> Result<(),String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let archive_path=portable_backup_path(&path,true)?;
+        let decrypted=decrypted_backup_file(&archive_path,&password)?;
+        std::fs::remove_file(decrypted).map_err(|e|format!("Не удалось удалить временную расшифрованную копию: {e}"))?;
+        let archive=std::fs::read(&archive_path).map_err(|e|e.to_string())?;
+        let (url,token)=sync_credentials(&app.state::<AppState>())?;
+        sync_client::upload(&url,&token,archive)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+async fn sync_download(app: tauri::AppHandle, path: String) -> Result<(),String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let destination=portable_backup_path(&path,false)?;
+        let (url,token)=sync_credentials(&app.state::<AppState>())?;
+        let archive=sync_client::download(&url,&token)?;
+        let mut file=create_private_file(&destination)?;
+        if let Err(error)=file.write_all(&archive).and_then(|_|file.sync_all()) {
+            drop(file);
+            let _=std::fs::remove_file(&destination);
+            return Err(error.to_string());
+        }
+        Ok(())
+    }).await.map_err(|e|e.to_string())?
 }
 
 #[tauri::command]
@@ -780,7 +849,7 @@ pub fn run() {
     };
     tauri::Builder::default().manage(AppState { db: Mutex::new(db), startup_error, runs: Arc::new(Mutex::new(HashMap::new())), api_key_saved: Mutex::new(None) })
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_portable_backup,inspect_portable_backup,import_portable_backup,export_obsidian])
+        .invoke_handler(tauri::generate_handler![snapshot,save_record,delete_record,data_location,move_data_directory,auth_status,codex_login,codex_logout,save_api_key,remove_api_key,agent_call,cancel_agent,save_skill_directories,list_skills,inspect_backup,export_backup,import_backup,export_portable_backup,inspect_portable_backup,import_portable_backup,sync_configure,sync_status,sync_disconnect,sync_upload,sync_download,export_obsidian])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<AppState>();
