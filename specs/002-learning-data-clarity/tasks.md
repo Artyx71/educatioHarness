@@ -8,5 +8,6 @@
 - [x] Add multi-goal, graph-linked Obsidian export and Rust regression test.
 - [x] Verify a real import and dashboard navigation in Android emulator.
 - [x] Run TypeScript, runtime, server and Rust tests locally.
-- [ ] Verify native file picker on Android and full GUI import on Windows/macOS.
-- [ ] Complete protected archive transfer between two distinct devices.
+- [x] Verify Android system file picker reads a `.md` from Downloads and previews its contents without submitting it.
+- [ ] Verify full GUI import on Windows/macOS.
+- [x] Transfer a protected synthetic archive from the Linux host to Android API 36 through a separate test server; verify goal, lesson, plan, attempt, graph link and provenance in SQLite after import. Physical devices and desktop GUI export remain unverified.

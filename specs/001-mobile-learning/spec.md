@@ -4,7 +4,7 @@
 
 **Created**: 2026-11-11
 
-**Status**: In progress; existing mobile code is not yet device-verified
+**Status**: In progress; Android learning journey and synthetic Linux-host-to-emulator archive transfer verified; physical-device transfer and iOS parity pending
 
 **Input**: The user wants educatioHarness installed on phones and able to continue the same learning journey after transfer from a computer.
 
@@ -49,6 +49,7 @@ An iPhone learner follows the same server-backed learning and restore path, with
 ### Edge Cases
 
 - The server token is currently kept only in process memory; after restart the user must reconnect. It must never be silently stored in SQLite.
+- After restart, stored lessons and the graph must remain available through an explicit offline choice even before the server token is re-entered. New AI requests still require reconnection.
 - Android/iOS file pickers return URI forms the current Rust file importer does not support; the phone transfer UI must not offer a broken direct-file flow.
 - Import while an agent request is running must be rejected.
 - Two devices editing the same baseline must not silently overwrite one another; no automatic merge is promised.
