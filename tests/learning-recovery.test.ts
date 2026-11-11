@@ -172,12 +172,14 @@ describe('learning workflow recovery', () => {
     await expect(teach('goal','session',topic,{provider:'codex',model:'default'})).rejects.toThrow('другой теме');
     expect(fake.save.mock.calls.filter(([table,record])=>table==='messages'&&record.role==='assistant')).toHaveLength(0);
     expect(fake.save).toHaveBeenCalledWith('workflow_executions',expect.objectContaining({step_id:'teach',status:'failed'}));
+    expect(fake.save).toHaveBeenCalledWith('agent_executions',expect.objectContaining({operation:'teach',status:'failed'}));
     vi.clearAllMocks();
     fake.snapshot.mockResolvedValue(snapshot);
     fake.save.mockResolvedValue(undefined);
     fake.agent.mockResolvedValue({kind:'reasoning',prompt:'Задание по другой теме',solution:'Ответ',topicId:'other',_execution:{durationMs:1}});
     await expect(generateExercise('goal',topic,{provider:'codex',model:'default'})).rejects.toThrow('другой теме');
     expect(fake.save.mock.calls.filter(([table])=>table==='exercises')).toHaveLength(0);
+    expect(fake.save).toHaveBeenCalledWith('agent_executions',expect.objectContaining({operation:'practice',status:'failed'}));
   });
 
   it('uses the retrieval skill for cards unless the learner selected a custom skill', async () => {

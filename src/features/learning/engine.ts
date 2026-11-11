@@ -46,7 +46,7 @@ export function orderCurriculumTopics<T extends {id:string;prerequisites:string[
 
 const skill:Record<Operation,string> = {probe:'knowledge-probe',evaluate_probe:'knowledge-probe',curriculum:'curriculum-planner',teach:'socratic-teacher',practice:'exercise-generator',evaluate_practice:'answer-evaluator',extract:'knowledge-extractor',audit:'knowledge-auditor',validate:''};
 
-async function call<T>(config:Config,operation:Operation,input:unknown,sessionId?:string):Promise<AgentResult<T>> {
+async function call<T>(config:Config,operation:Operation,input:unknown,sessionId?:string,validate?:(result:AgentResult<T>)=>void):Promise<AgentResult<T>> {
   const snapshot = await api.snapshot();
   const threadKey=`thread:${config.provider}:${sessionId}:${operation}`;
   const threadId = sessionId ? snapshot.preferences.find(p=>p.key===threadKey)?.value : undefined;
@@ -55,6 +55,7 @@ async function call<T>(config:Config,operation:Operation,input:unknown,sessionId
     const selected = config.skillOverrides?.[operation];
     const skillName = selected && /^[a-z][a-z0-9-]{0,60}$/.test(selected) ? selected : skill[operation];
     const result = await api.agent<T>(operation,config.provider,config.model,input,skillName,threadId);
+    validate?.(result);
     if(sessionId && result._execution.sessionId) await api.save('preferences',{key:threadKey,value:result._execution.sessionId});
     await api.save('agent_executions',{id:id(),session_id:sessionId??'',provider:config.provider,model:config.model,operation,status:'completed',duration_ms:String(result._execution.durationMs),metadata:JSON.stringify({usage:result._execution.usage??null}),created_at:now()});
     return result;
@@ -172,8 +173,9 @@ export async function teach(goalId:string,sessionId:string,topic:Topic,config:Co
   await workflow(goalId,'teach','running',{topicId:topic.id,answer:answer??''},null,'',sessionId);
   let result:AgentResult<Teaching>;
   try {
-    result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:parseStringList(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId);
-    if(result.topicId!==topic.id) throw new Error('Ответ учителя относится к другой теме. Повторите запрос.');
+    result=await call<Teaching>(config,'teach',{goal:goal.title,topic:{id:topic.id,title:topic.title,description:topic.description,objectives:parseStringList(topic.objectives)},history,recordedClaims,answer:answer??null},sessionId,response=>{
+      if(response.topicId!==topic.id) throw new Error('Ответ учителя относится к другой теме. Повторите запрос.');
+    });
   }
   catch(e) { await workflow(goalId,'teach',String(e).includes('отменён')?'cancelled':'failed',{topicId:topic.id,answer:answer??''},null,String(e),sessionId); throw e; }
   const text=`${result.message}\n\n**${result.questionType==='predict'?'Предположите':'Проверьте понимание'}:** ${result.question}`;
@@ -209,8 +211,9 @@ export async function generateExercise(goalId:string,topic:Topic,config:Config,f
   const attempts=snap.attempts.filter(item=>topicExerciseIds.has(item.exercise_id)).slice(-8).map(item=>({answer:item.answer,evaluation:item.evaluation}));
   const selectedConfig=format==='retrieval_card'&&!config.skillOverrides?.practice
     ? {...config,skillOverrides:{...config.skillOverrides,practice:'retrieval-review'}} : config;
-  const result=await call<Practice>(selectedConfig,'practice',{goal:goal.title,topic,attempts,format});
-  if(result.topicId!==topic.id) throw new Error('Задание относится к другой теме. Создайте его ещё раз.');
+  const result=await call<Practice>(selectedConfig,'practice',{goal:goal.title,topic,attempts,format},undefined,response=>{
+    if(response.topicId!==topic.id) throw new Error('Задание относится к другой теме. Создайте его ещё раз.');
+  });
   const exercise={id:id(),goal_id:goalId,topic_id:topic.id,kind:result.kind,prompt:result.prompt,solution:result.solution,created_at:now()};
   await api.save('exercises',exercise); return exercise;
 }
