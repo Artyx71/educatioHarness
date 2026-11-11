@@ -1666,6 +1666,7 @@ mod tests {
             let name=name.to_string_lossy();
             name.starts_with(".staged-import-") || name.starts_with(".import-") || name.starts_with(".export-")
         }));
+        drop(state); // Windows cannot remove a directory while SQLite still has the DB open.
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
