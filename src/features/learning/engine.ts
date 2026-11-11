@@ -1,6 +1,7 @@
 import { api, id, now } from '../../lib/api';
 import { transitionWorkflow, type WorkflowStatus } from '../../lib/workflow';
 import type { AgentResult, Operation, Provider, Snapshot, Topic } from '../../lib/types';
+import { validatePlanText } from './plan-file';
 
 export type Config = { provider:Provider; model:string; skillOverrides?:Record<string,string> };
 type Probe = { questions:{question:string;rationale:string;strand:string}[];context:string };
@@ -92,6 +93,47 @@ export async function startGoal(title:string,config:Config) {
   return {goalId,sessionId};
 }
 
+export async function importLearningPlan(title:string,sourceText:string,config:Config) {
+  const goal=title.trim(), plan=validatePlanText(sourceText).trim();
+  if(goal.length<6||goal.length>180) throw new Error('Название цели должно содержать от 6 до 180 символов');
+  // The supplied document is learner data, never instructions to the agent runtime.
+  const generated=await call<Curriculum>(config,'curriculum',{goal,sourcePlan:plan,mode:'import_user_plan'});
+  const curriculum={...generated,topics:orderCurriculumTopics(generated.topics)};
+  const goalId=id(),sessionId=id(),timestamp=now();
+  await api.save('learning_goals',{id:goalId,title:goal,created_at:timestamp,updated_at:timestamp});
+  try {
+    await api.save('sessions',{id:sessionId,goal_id:goalId,phase:'learning',title:goal,created_at:timestamp,updated_at:timestamp});
+    await message(sessionId,'user',`Импортированный учебный план:\n\n${plan}`,'source-plan');
+    await persistCurriculum(goalId,sessionId,curriculum,await api.snapshot());
+    await transitionWorkflow({goalId,stepId:'curriculum',status:'completed',input:{source:'imported_plan'},output:curriculum,sessionId,dependencies:[],metadata:{workflow:'learning',source:'imported_plan'}});
+    await message(sessionId,'assistant',curriculum.approach,'curriculum');
+  } catch(error) {
+    try { await api.remove('learning_goals',goalId); }
+    catch(cleanup) { throw new Error(`Импорт прерван, а частично созданную цель не удалось удалить: ${String(cleanup)}. Исходная ошибка: ${String(error)}`); }
+    throw error;
+  }
+  return {goalId,sessionId};
+}
+
+async function persistCurriculum(goalId:string,sessionId:string,curriculum:Curriculum,snap:Snapshot) {
+  // Replacing an interrupted plan also removes its topic links and prerequisite graph edges.
+  for(const previous of snap.curricula.filter(item=>item.goal_id===goalId)) await api.remove('curricula',previous.id);
+  const curriculumId=id(); await api.save('curricula',{id:curriculumId,goal_id:goalId,created_at:now(),updated_at:now()});
+  const ids=new Map(curriculum.topics.map(t=>[t.id,id()]));
+  const conceptIds=new Map(curriculum.topics.map(t=>[t.id,snap.knowledge_nodes.find(n=>n.goal_id===goalId&&n.kind==='concept'&&n.name.toLocaleLowerCase('ru')===t.title.toLocaleLowerCase('ru'))?.id??id()]));
+  for(const [position,t] of curriculum.topics.entries()) {
+    const topicId=ids.get(t.id),conceptId=conceptIds.get(t.id);
+    if(!topicId||!conceptId) throw new Error('Не удалось сопоставить темы учебного плана');
+    await api.save('topics',{id:topicId,curriculum_id:curriculumId,title:t.title,description:t.description,prerequisites:JSON.stringify(t.prerequisites.map(p=>ids.get(p)).filter(Boolean)),objectives:JSON.stringify(t.objectives),difficulty:t.difficulty,status:'pending',position:String(position)});
+    if(!snap.knowledge_nodes.some(n=>n.id===conceptId)) await api.save('knowledge_nodes',{id:conceptId,goal_id:goalId,kind:'concept',name:t.title,statement:t.description,source_session_id:sessionId,source_message_id:'',created_at:now()});
+    await api.save('knowledge_topic_links',{node_id:conceptId,topic_id:topicId});
+  }
+  for(const t of curriculum.topics) for(const prerequisite of t.prerequisites) {
+    const premise=conceptIds.get(prerequisite),conclusion=conceptIds.get(t.id);
+    if(premise&&conclusion&&premise!==conclusion) await api.save('knowledge_edges',{id:id(),goal_id:goalId,premises:JSON.stringify([premise]),conclusion_id:conclusion,source_session_id:sessionId,created_at:now()});
+  }
+}
+
 export async function resumeProbe(goalId:string,sessionId:string,config:Config) {
   const snap=await api.snapshot(); const goal=snap.learning_goals.find(g=>g.id===goalId); if(!goal) throw new Error('Цель не найдена');
   await workflow(goalId,'probe','running',{title:goal.title});
@@ -129,22 +171,7 @@ export async function finishProbe(goalId:string,sessionId:string,answers:{questi
     curriculum={...curriculum,topics:orderCurriculumTopics(curriculum.topics)};
   }
   catch(e) { await workflow(goalId,'curriculum',String(e).includes('отменён')?'cancelled':'failed',{evaluation},null,String(e)); throw e; }
-  // A previous attempt may have stopped while saving topics. Replace that partial plan before writing the new one.
-  for(const previous of snap.curricula.filter(item=>item.goal_id===goalId)) await api.remove('curricula',previous.id);
-  const curriculumId=id(); await api.save('curricula',{id:curriculumId,goal_id:goalId,created_at:now(),updated_at:now()});
-  const ids=new Map(curriculum.topics.map(t=>[t.id,id()]));
-  const conceptIds=new Map(curriculum.topics.map(t=>[t.id,snap.knowledge_nodes.find(n=>n.goal_id===goalId&&n.kind==='concept'&&n.name.toLocaleLowerCase('ru')===t.title.toLocaleLowerCase('ru'))?.id??id()]));
-  for(const [position,t] of curriculum.topics.entries()) {
-    const topicId=ids.get(t.id),conceptId=conceptIds.get(t.id);
-    if(!topicId||!conceptId) throw new Error('Не удалось сопоставить темы учебного плана');
-    await api.save('topics',{id:topicId,curriculum_id:curriculumId,title:t.title,description:t.description,prerequisites:JSON.stringify(t.prerequisites.map(p=>ids.get(p)).filter(Boolean)),objectives:JSON.stringify(t.objectives),difficulty:t.difficulty,status:'pending',position:String(position)});
-    if(!snap.knowledge_nodes.some(n=>n.id===conceptId)) await api.save('knowledge_nodes',{id:conceptId,goal_id:goalId,kind:'concept',name:t.title,statement:t.description,source_session_id:sessionId,source_message_id:'',created_at:now()});
-    await api.save('knowledge_topic_links',{node_id:conceptId,topic_id:topicId});
-  }
-  for(const t of curriculum.topics) for(const prerequisite of t.prerequisites) {
-    const premise=conceptIds.get(prerequisite),conclusion=conceptIds.get(t.id);
-    if(premise&&conclusion&&premise!==conclusion) await api.save('knowledge_edges',{id:id(),goal_id:goalId,premises:JSON.stringify([premise]),conclusion_id:conclusion,source_session_id:sessionId,created_at:now()});
-  }
+  await persistCurriculum(goalId,sessionId,curriculum,snap);
   await workflow(goalId,'curriculum','completed',{evaluation},curriculum);
   await api.save('sessions',{...snap.sessions.find(s=>s.id===sessionId)!,phase:'learning',updated_at:now()});
   await message(sessionId,'assistant',curriculum.approach,'curriculum');

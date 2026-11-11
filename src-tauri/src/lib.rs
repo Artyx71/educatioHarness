@@ -622,29 +622,57 @@ fn export_obsidian(state: State<AppState>, directory: String) -> Result<String, 
     let vault = PathBuf::from(&directory);
     if !vault.is_absolute() || directory.len() > 4096 || !std::fs::symlink_metadata(&vault).map_err(|e|e.to_string())?.file_type().is_dir() { return Err("Выберите существующий каталог заметок".into()); }
     let db = state.db.lock().map_err(|e|e.to_string())?;
+    export_obsidian_db(&db,&vault)
+}
+
+fn export_obsidian_db(db: &Connection, vault: &std::path::Path) -> Result<String, String> {
     let goals: Vec<(String,String)> = db.prepare("SELECT id,title FROM learning_goals ORDER BY created_at")
         .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
         .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
     let topics: Vec<(String,String,String,String)> = db.prepare("SELECT c.goal_id,t.title,t.description,t.id FROM topics t JOIN curricula c ON c.id=t.curriculum_id ORDER BY t.position")
         .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e|e.to_string())?
         .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
-    let claims: Vec<(String,String,String,String)> = db.prepare("SELECT goal_id,name,statement,COALESCE(source_session_id,'') FROM knowledge_nodes WHERE kind='proposition' ORDER BY created_at")
-        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(|e|e.to_string())?
+    let nodes: Vec<(String,String,String,String,String,String)> = db.prepare("SELECT id,goal_id,kind,name,statement,COALESCE(source_session_id,'') FROM knowledge_nodes ORDER BY created_at,id")
+        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).map_err(|e|e.to_string())?
+        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+    let edges: Vec<(String,String,String)> = db.prepare("SELECT goal_id,premises,conclusion_id FROM knowledge_edges ORDER BY created_at,id")
+        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(|e|e.to_string())?
+        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+    let topic_links: Vec<(String,String)> = db.prepare("SELECT node_id,topic_id FROM knowledge_topic_links")
+        .map_err(|e|e.to_string())?.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
         .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
     let folder = vault.join(format!("educatioHarness-{}",&uuid::Uuid::new_v4().to_string()[..8]));
     std::fs::create_dir(&folder).map_err(|e|e.to_string())?;
-    let mut index = String::from("# educatioHarness — учебные заметки\n\nЭкспорт идей и плана. Утверждение в графе не доказывает понимание.\n\n");
+    let mut index = String::from("# educatioHarness — учебные заметки\n\nЭкспорт идей, плана и связей графа. Утверждение в графе не доказывает понимание.\n\n");
     for (goal_index,(goal_id,title)) in goals.iter().enumerate() {
-        let filename = format!("Цель-{}.md",goal_index+1);
-        index.push_str(&format!("- [[Цель-{}|{}]]\n",goal_index+1,title.replace(['\n','|']," ")));
+        let goal_number=goal_index+1;
+        let filename = format!("Цель-{goal_number}.md");
+        index.push_str(&format!("- [[Цель-{goal_number}|{}]]\n",title.replace(['\n','|']," ")));
         let mut body = format!("# {}\n\n## Темы\n\n",title);
-        for (topic_index,(_,name,description,_)) in topics.iter().enumerate().filter(|(_,t)|&t.0==goal_id) {
-            body.push_str(&format!("- [[Тема-{}|{}]]\n",topic_index+1,name.replace(['\n','|']," ")));
-            std::fs::write(folder.join(format!("Тема-{}.md",topic_index+1)),format!("# {}\n\n{}\n",name,description)).map_err(|e|e.to_string())?;
+        let mut topic_names=HashMap::new();
+        for (topic_index,(_,name,description,topic_id)) in topics.iter().filter(|t|&t.0==goal_id).enumerate() {
+            let topic_file=format!("Тема-{goal_number}-{}",topic_index+1);
+            body.push_str(&format!("- [[{topic_file}|{}]]\n",name.replace(['\n','|']," ")));
+            topic_names.insert(topic_id.clone(),topic_file.clone());
+            std::fs::write(folder.join(format!("{topic_file}.md")),format!("# {}\n\n{}\n\n[[Цель-{goal_number}|Учебная цель]]\n",name,description)).map_err(|e|e.to_string())?;
         }
-        body.push_str("\n## Утверждения из графа\n\n");
-        for (_,name,statement,source) in claims.iter().filter(|c|&c.0==goal_id) {
-            body.push_str(&format!("### {}\n\n{}\n\nИсточник: занятие `{}`. Это запись модели, не доказательство усвоения.\n\n",name,statement,source));
+        body.push_str("\n## Граф знаний\n\n");
+        let goal_nodes:Vec<_>=nodes.iter().filter(|node|&node.1==goal_id).collect();
+        let node_names:HashMap<_,_>=goal_nodes.iter().enumerate().map(|(i,node)|(node.0.clone(),format!("Узел-{goal_number}-{}",i+1))).collect();
+        for node in goal_nodes {
+            let node_file=node_names.get(&node.0).ok_or("Missing node")?;
+            body.push_str(&format!("- [[{node_file}|{}]] ({})\n",node.3.replace(['\n','|']," "),node.2));
+            let source=if node.5.is_empty(){"не сохранён".to_string()}else{format!("занятие `{}`",node.5)};
+            let mut note=format!("# {}\n\n{}\n\nТип: {}. Источник: {}. Запись графа не доказывает усвоение.\n\n[[Цель-{goal_number}|Учебная цель]]\n",node.3,node.4,node.2,source);
+            for (node_id,topic_id) in &topic_links {
+                if node_id==&node.0 {if let Some(topic_file)=topic_names.get(topic_id){note.push_str(&format!("- Тема: [[{topic_file}]]\n"));}}
+            }
+            for (edge_goal,premises,conclusion) in &edges {
+                if edge_goal!=goal_id || conclusion!=&node.0 {continue}
+                let ids:Vec<String>=serde_json::from_str(premises).unwrap_or_default();
+                for premise in ids {if let Some(premise_file)=node_names.get(&premise){note.push_str(&format!("- Предпосылка: [[{premise_file}]]\n"));}}
+            }
+            std::fs::write(folder.join(format!("{node_file}.md")),note).map_err(|e|e.to_string())?;
         }
         std::fs::write(folder.join(filename),body).map_err(|e|e.to_string())?;
     }
@@ -1373,6 +1401,33 @@ mod tests {
             let count:i64=conn.query_row(&format!("SELECT count(*) FROM {table}"),[],|row|row.get(0)).unwrap();
             assert_eq!(count,0,"{table}");
         }
+    }
+    #[test]
+    fn obsidian_export_keeps_goals_separate_and_links_graph_relationships() {
+        let root=std::env::temp_dir().join(format!("educatio-obsidian-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let conn=Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrate(&conn).unwrap();
+        conn.execute_batch("INSERT INTO learning_goals VALUES ('g1','Язык C','t','t');
+            INSERT INTO learning_goals VALUES ('g2','Rust','t','t');
+            INSERT INTO curricula VALUES ('c1','g1','t','t');
+            INSERT INTO curricula VALUES ('c2','g2','t','t');
+            INSERT INTO topics VALUES ('t1','c1','Память','desc','[]','[]','beginner','pending',0);
+            INSERT INTO topics VALUES ('t2','c2','Владение','desc','[]','[]','beginner','pending',0);
+            INSERT INTO knowledge_nodes VALUES ('n1','g1','concept','Адрес','Описывает позицию',NULL,NULL,'t');
+            INSERT INTO knowledge_nodes VALUES ('n2','g1','proposition','Указатель','Хранит адрес',NULL,NULL,'t');
+            INSERT INTO knowledge_topic_links VALUES ('n1','t1');
+            INSERT INTO knowledge_edges VALUES ('e1','g1','[\"n1\"]','n2',NULL,'t');").unwrap();
+        let folder=export_obsidian_db(&conn,&root).unwrap();
+        let folder=std::path::Path::new(&folder);
+        assert!(folder.join("Тема-1-1.md").exists());
+        assert!(folder.join("Тема-2-1.md").exists());
+        assert!(std::fs::read_to_string(folder.join("Цель-2.md")).unwrap().contains("[[Тема-2-1|Владение]]"));
+        let conclusion=std::fs::read_to_string(folder.join("Узел-1-2.md")).unwrap();
+        assert!(conclusion.contains("[[Узел-1-1]]"));
+        assert!(!conclusion.contains("Тема-2-1"));
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn prerequisite_topic_cannot_be_deleted_until_dependencies_are_removed() {

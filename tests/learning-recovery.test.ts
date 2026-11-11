@@ -10,7 +10,7 @@ const fake = vi.hoisted(() => ({
 
 vi.mock('../src/lib/api', () => ({ api: fake, id: () => crypto.randomUUID(), now: () => new Date().toISOString() }));
 
-import { finishProbe, generateExercise, retryKnowledgeExtraction, startLearningSession, teach } from '../src/features/learning/engine';
+import { finishProbe, generateExercise, importLearningPlan, retryKnowledgeExtraction, startLearningSession, teach } from '../src/features/learning/engine';
 
 describe('learning workflow recovery', () => {
   beforeEach(() => {
@@ -75,6 +75,35 @@ describe('learning workflow recovery', () => {
     await expect(finishProbe('goal','session',[{question:'Вопрос 1',answer:'Ответ 1',reasoning:'Мысль 1'}],{provider:'codex',model:'default'})).rejects.toThrow('отсутствующую предпосылку');
     expect(fake.remove).not.toHaveBeenCalled();
     expect(fake.save).toHaveBeenCalledWith('workflow_executions',expect.objectContaining({step_id:'curriculum',status:'failed'}));
+  });
+
+  it('imports a learner plan with real curriculum semantics and without diagnostic claims', async () => {
+    const source='# C\n- Компиляция\n- Указатели и память';
+    const result=await importLearningPlan('Изучить язык C',source,{provider:'codex',model:'default'});
+    expect(result.goalId).toBeTruthy();
+    expect(fake.agent).toHaveBeenCalledWith('curriculum','codex','default',expect.objectContaining({sourcePlan:source,mode:'import_user_plan'}),'curriculum-planner',undefined);
+    expect(fake.save).toHaveBeenCalledWith('sessions',expect.objectContaining({goal_id:result.goalId,phase:'learning'}));
+    expect(fake.save).toHaveBeenCalledWith('topics',expect.objectContaining({title:'Указатели'}));
+    expect(fake.save).toHaveBeenCalledWith('workflow_executions',expect.objectContaining({step_id:'curriculum',status:'completed',dependencies:'[]'}));
+    expect(fake.save.mock.calls.some(([table,record])=>table==='messages'&&record.kind==='source-plan'&&record.content.includes(source))).toBe(true);
+    expect(fake.save.mock.calls.some(([table])=>table==='diagnostic_answers')).toBe(false);
+  });
+
+  it('does not create a goal when an imported plan has invalid dependencies', async () => {
+    fake.agent.mockResolvedValue({approach:'',topics:[{id:'pointers',title:'Указатели',description:'',prerequisites:['missing'],objectives:[],difficulty:'beginner'}],_execution:{durationMs:1}});
+    await expect(importLearningPlan('Изучить язык C','# C\n- Компиляция\n- Указатели и память',{provider:'codex',model:'default'})).rejects.toThrow('отсутствующую предпосылку');
+    expect(fake.save.mock.calls.some(([table])=>table==='learning_goals')).toBe(false);
+  });
+
+  it('removes only the new goal if saving an imported plan fails halfway', async () => {
+    const persist=fake.save.getMockImplementation()!;
+    fake.save.mockImplementation(async (table:string,record:unknown)=>{
+      if(table==='topics') throw new Error('storage full');
+      await persist(table,record);
+    });
+    await expect(importLearningPlan('Изучить язык C','# C\n- Компиляция\n- Указатели и память',{provider:'codex',model:'default'})).rejects.toThrow('storage full');
+    const created=fake.save.mock.calls.find(([table])=>table==='learning_goals')?.[1].id;
+    expect(fake.remove).toHaveBeenCalledWith('learning_goals',created);
   });
 
   it('reuses a completed evaluation for unchanged answers after a curriculum interruption', async () => {
