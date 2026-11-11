@@ -910,6 +910,23 @@ fn remove_api_key() -> Result<(),String> { Err("Ключ OpenAI API на тел�
 #[serde(rename_all = "camelCase")]
 struct AgentRequest { request_id: String, operation: String, provider: String, model: String, input: Value, skill: String, session_id: Option<String> }
 
+fn terminate_agent_tree(child: &mut Child) {
+    #[cfg(unix)] {
+        // The sidecar is started in its own process group so its Codex child
+        // cannot outlive a cancelled desktop request.
+        let group = -(child.id() as i32);
+        if unsafe { libc::kill(group, libc::SIGKILL) } != 0 { let _ = child.kill(); }
+    }
+    #[cfg(windows)] {
+        let pid = child.id().to_string();
+        let status = Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).status();
+        if !status.is_ok_and(|value| value.success()) { let _ = child.kill(); }
+    }
+    let _ = child.wait();
+}
+
 fn wait_for_agent<F: Fn(&str) + Send + 'static>(mut child: Child, cancelled: &AtomicBool, timeout: Duration, on_line: F) -> Result<Output, String> {
     let started = Instant::now();
     let stdout = child.stdout.take().ok_or("Missing runtime stdout")?;
@@ -929,16 +946,14 @@ fn wait_for_agent<F: Fn(&str) + Send + 'static>(mut child: Child, cancelled: &At
     let stderr_reader = std::thread::spawn(move || { let mut data = Vec::new(); stderr.read_to_end(&mut data).map(|_| data) });
     let status = loop {
         if cancelled.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_agent_tree(&mut child);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err("Запрос отменён".into());
         }
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? { break status; }
         if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_agent_tree(&mut child);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err("Время ожидания ответа ИИ истекло".into());
@@ -1028,6 +1043,10 @@ async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_overrid
     let event_request_id = request_id.clone();
     let work = tauri::async_runtime::spawn_blocking(move || {
         let mut command = Command::new(&sidecar);
+        #[cfg(unix)] {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let runtime_dir = script.parent().ok_or("Agent runtime path is invalid")?;
         command.arg(&script).current_dir(runtime_dir).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         command.env("EDUCATIOHARNESS_SKILLS_DIR", skills);
@@ -1284,6 +1303,31 @@ mod tests {
         let result = wait_for_agent(child, &cancelled, Duration::from_secs(1), |_| {});
         assert!(result.unwrap_err().contains("отменён"));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    #[test]
+    #[cfg(target_os="linux")]
+    fn cancellation_stops_agent_descendants() {
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::AtomicU32;
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & echo $!; wait"])
+            .process_group(0).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = command.spawn().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let descendant = Arc::new(AtomicU32::new(0));
+        let (signal, pid) = (cancelled.clone(), descendant.clone());
+        let result = wait_for_agent(child, &cancelled, Duration::from_secs(3), move |line| {
+            if let Ok(value) = line.trim().parse::<u32>() {
+                pid.store(value, Ordering::Relaxed);
+                signal.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(result.unwrap_err().contains("отменён"));
+        let pid = descendant.load(Ordering::Relaxed);
+        assert!(pid > 0);
+        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+            .and_then(|raw| raw.split(") ").nth(1).and_then(|tail| tail.chars().next()));
+        assert!(matches!(state, None | Some('Z')), "descendant still running: {state:?}");
     }
     #[test]
     #[cfg(unix)]
