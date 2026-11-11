@@ -4,7 +4,7 @@
 
 **Created**: 2026-11-11
 
-**Status**: In progress; Android learning journey and synthetic Linux-host-to-emulator archive transfer verified; physical-device transfer and iOS parity pending
+**Status**: In progress; Android learning journey and synthetic Linux-host-to-emulator archive transfer verified; iOS simulator launch verified, but physical-device transfer and iOS learning/transfer parity pending
 
 **Input**: The user wants educatioHarness installed on phones and able to continue the same learning journey after transfer from a computer.
 
