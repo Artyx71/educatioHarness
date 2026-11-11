@@ -261,7 +261,7 @@ fn backup_path(path: &str, must_exist: bool) -> Result<PathBuf, String> {
     if must_exist {
         let meta = std::fs::symlink_metadata(&file).map_err(|e|e.to_string())?;
         if !meta.file_type().is_file() || meta.len() > 500_000_000 { return Err("Некорректный файл или архив больше 500 МБ".into()); }
-    } else if file.exists() && !std::fs::symlink_metadata(&file).map_err(|e|e.to_string())?.file_type().is_file() { return Err("Путь назначения должен быть обычным файлом".into()); }
+    } else if std::fs::symlink_metadata(&file).is_ok() { return Err("Файл уже существует. Выберите другое имя для резервной копии".into()); }
     Ok(file)
 }
 
@@ -289,6 +289,18 @@ fn create_private_file(path: &std::path::Path) -> Result<std::fs::File, String> 
         options.mode(0o600);
     }
     options.open(path).map_err(|e| e.to_string())
+}
+
+fn copy_to_new_private_file(source: &std::path::Path, destination: &std::path::Path) -> Result<(), String> {
+    let mut output = create_private_file(destination)?;
+    let result = (|| {
+        let mut input = std::fs::File::open(source).map_err(|e|e.to_string())?;
+        std::io::copy(&mut input,&mut output).map_err(|e|e.to_string())?;
+        output.sync_all().map_err(|e|e.to_string())?;
+        Ok(())
+    })();
+    if result.is_err() {drop(output);let _=std::fs::remove_file(destination);}
+    result
 }
 
 fn decrypted_backup_file(app: &tauri::AppHandle, path: &std::path::Path, password: &str) -> Result<PathBuf, String> {
@@ -361,7 +373,7 @@ fn export_backup(state: State<AppState>, path: String) -> Result<BackupInfo, Str
         Backup::new(&source,&mut copy).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
         drop(copy);
         let info = inspect_backup_file(&temporary)?;
-        std::fs::copy(&temporary,&destination).map_err(|e|e.to_string())?;
+        copy_to_new_private_file(&temporary,&destination)?;
         Ok(info)
     })();
     let _ = std::fs::remove_file(&temporary);
@@ -566,22 +578,38 @@ fn import_backup(app: tauri::AppHandle, state: State<AppState>, path: String) ->
 
 fn import_backup_file(state: &AppState, source_path: &std::path::Path, safety_dir: &std::path::Path) -> Result<BackupInfo, String> {
     let info = inspect_backup_file(&source_path)?;
-    let source = Connection::open_with_flags(&source_path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
-    let mut target = state.db.lock().map_err(|e|e.to_string())?;
-    if is_live_database_path(&target,source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
-    let local_sync:Vec<(String,String)>=target.prepare("SELECT key,value FROM preferences WHERE key IN ('sync_server_url','sync_last_etag')").map_err(|e|e.to_string())?
-        .query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
-        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
-    let safety_path = safety_dir.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
-    drop(create_private_file(&safety_path)?);
-    let mut safety = Connection::open(&safety_path).map_err(|e|e.to_string())?;
-    Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
-    drop(safety);
-    Backup::new(&source,&mut target).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
-    migrate(&target)?;
-    target.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides','sync_server_url','sync_last_etag')",[]).map_err(|e|e.to_string())?;
-    for (key,value) in local_sync {target.execute("INSERT INTO preferences(key,value) VALUES(?1,?2)",params![key,value]).map_err(|e|e.to_string())?;}
-    Ok(info)
+    let staged_path = safety_dir.join(format!(".staged-import-{}.sqlite3",uuid::Uuid::new_v4()));
+    let result = (|| {
+        drop(create_private_file(&staged_path)?);
+        let source = Connection::open_with_flags(source_path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
+        let mut staged = Connection::open(&staged_path).map_err(|e|e.to_string())?;
+        Backup::new(&source,&mut staged).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
+        migrate(&staged)?;
+        let mut target = state.db.lock().map_err(|e|e.to_string())?;
+        if is_live_database_path(&target,source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
+        let local_sync:Vec<(String,String)>=target.prepare("SELECT key,value FROM preferences WHERE key IN ('sync_server_url','sync_last_etag')").map_err(|e|e.to_string())?
+            .query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
+            .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+        staged.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides','sync_server_url','sync_last_etag')",[]).map_err(|e|e.to_string())?;
+        for (key,value) in local_sync {staged.execute("INSERT INTO preferences(key,value) VALUES(?1,?2)",params![key,value]).map_err(|e|e.to_string())?;}
+        inspect_backup_file(&staged_path)?;
+        let safety_path = safety_dir.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
+        drop(create_private_file(&safety_path)?);
+        let mut safety = Connection::open(&safety_path).map_err(|e|e.to_string())?;
+        Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
+        drop(safety);
+        if let Err(error) = Backup::new(&staged,&mut target).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)) {
+            let restore = Connection::open_with_flags(&safety_path,OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .and_then(|backup_db| Backup::new(&backup_db,&mut target).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)));
+            return match restore {
+                Ok(()) => Err(format!("Импорт прерван: {error}. Исходная база восстановлена; её копия: {}",safety_path.display())),
+                Err(restore_error) => Err(format!("Импорт прерван: {error}. Автоматическое восстановление не удалось: {restore_error}. Резервная копия: {}",safety_path.display())),
+            };
+        }
+        Ok(info)
+    })();
+    let _ = std::fs::remove_file(&staged_path);
+    result
 }
 
 #[tauri::command]
@@ -1293,6 +1321,22 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
     #[test]
+    fn plain_export_never_overwrites_an_existing_file() {
+        let root=std::env::temp_dir().join(format!("educatio-export-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source=root.join("source.sqlite3");
+        let destination=root.join("backup.sqlite3");
+        std::fs::write(&source,b"new backup").unwrap();
+        std::fs::write(&destination,b"original file").unwrap();
+        assert!(backup_path(destination.to_str().unwrap(),false).is_err());
+        assert!(copy_to_new_private_file(&source,&destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(),b"original file");
+        std::fs::remove_file(&destination).unwrap();
+        copy_to_new_private_file(&source,&destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(),b"new backup");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn encrypted_archive_preserves_schema_and_never_imports_wrong_password() {
         let root = std::env::temp_dir().join(format!("educatio-protected-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
@@ -1353,6 +1397,38 @@ mod tests {
         let backups:Vec<PathBuf>=std::fs::read_dir(&root).unwrap().map(|entry|entry.unwrap().path()).filter(|path|path.file_name().unwrap().to_string_lossy().starts_with("before-import-")).collect();
         assert_eq!(backups.len(),1);
         assert_eq!(inspect_backup_file(&backups[0]).unwrap().goals,1);
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".staged-import-")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn legacy_import_migrates_in_staging_and_preserves_recovery_copy() {
+        let root=std::env::temp_dir().join(format!("educatio-staged-import-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source_path=root.join("legacy.sqlite3");
+        let source=Connection::open(&source_path).unwrap();
+        source.execute_batch(include_str!("../../migrations/001_initial.sql")).unwrap();
+        source.execute_batch(include_str!("../../migrations/002_provenance.sql")).unwrap();
+        source.execute_batch("PRAGMA user_version=2; INSERT INTO learning_goals VALUES ('new','Новая цель','now','now');").unwrap();
+        drop(source);
+        let target=Connection::open(root.join("current.sqlite3")).unwrap();
+        migrate(&target).unwrap();
+        target.execute("INSERT INTO learning_goals VALUES ('old','Исходная цель','now','now')",[]).unwrap();
+        let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None),#[cfg(mobile)] sync_token:Mutex::new(None)};
+        assert!(import_backup_file(&state,&root.join("current.sqlite3"),&root).unwrap_err().contains("открытую базу"));
+        assert!(!std::fs::read_dir(&root).unwrap().any(|entry|entry.unwrap().file_name().to_string_lossy().starts_with(".staged-import-")));
+        assert_eq!(import_backup_file(&state,&source_path,&root).unwrap().version,2);
+        let current=state.db.lock().unwrap();
+        let version:i64=current.query_row("PRAGMA user_version",[],|row|row.get(0)).unwrap();
+        let title:String=current.query_row("SELECT title FROM learning_goals",[],|row|row.get(0)).unwrap();
+        assert_eq!((version,title.as_str()),(5,"Новая цель"));
+        drop(current);
+        let files:Vec<PathBuf>=std::fs::read_dir(&root).unwrap().map(|entry|entry.unwrap().path()).collect();
+        assert!(!files.iter().any(|path|path.file_name().unwrap().to_string_lossy().starts_with(".staged-import-")));
+        let recovery=files.iter().find(|path|path.file_name().unwrap().to_string_lossy().starts_with("before-import-")).unwrap();
+        let backup=Connection::open_with_flags(recovery,OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let original:String=backup.query_row("SELECT title FROM learning_goals",[],|row|row.get(0)).unwrap();
+        assert_eq!(original,"Исходная цель");
+        drop(backup);drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
