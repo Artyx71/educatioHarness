@@ -20,7 +20,9 @@ test('encrypted archive relay authenticates and prevents stale overwrites',async
     assert.equal((await fetch(url,{headers:{authorization:'Bearer invalid'}})).status,401);
     assert.equal((await fetch(url,{headers:{authorization:`Bearer ${token}`}})).status,404);
     const headers={authorization:`Bearer ${token}`,'if-none-match':'*'};
-    assert.equal((await fetch(url,{method:'PUT',headers,body:archive})).status,200);
+    const firstUpload=await fetch(url,{method:'PUT',headers,body:archive});
+    assert.equal(firstUpload.status,200);
+    assert.match(firstUpload.headers.get('etag')??'',/^"[a-f0-9]{64}"$/);
     const fetched=await fetch(url,{headers:{authorization:`Bearer ${token}`}});
     assert.equal(fetched.status,200);
     assert.equal(fetched.headers.get('x-educatio-sync'),'1');

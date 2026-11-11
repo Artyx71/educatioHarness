@@ -367,7 +367,7 @@ fn import_portable_backup(state: State<AppState>, path: String, password: String
     if !state.runs.lock().map_err(|e| e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
     let source = portable_backup_path(&path, true)?;
     let temporary = decrypted_backup_file(&source, &password)?;
-    let result = import_backup_file(&state, &temporary);
+    let result = import_backup_file(&state, &temporary, &app_dir()?);
     let _ = std::fs::remove_file(temporary);
     result
 }
@@ -384,7 +384,12 @@ async fn sync_configure(app: tauri::AppHandle, url: String, token: String) -> Re
     tauri::async_runtime::spawn_blocking(move || {
         let checked=sync_client::status(&url,&token)?;
         keyring::Entry::new("educatio-harness","sync-server-token").map_err(|e|e.to_string())?.set_password(&token).map_err(|e|e.to_string())?;
-        app.state::<AppState>().db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_server_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![url]).map_err(|e|e.to_string())?;
+        let state=app.state::<AppState>();
+        let mut db=state.db.lock().map_err(|e|e.to_string())?;
+        let transaction=db.transaction().map_err(|e|e.to_string())?;
+        transaction.execute("DELETE FROM preferences WHERE key='sync_last_etag'",[]).map_err(|e|e.to_string())?;
+        transaction.execute("INSERT INTO preferences(key,value) VALUES('sync_server_url',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![url]).map_err(|e|e.to_string())?;
+        transaction.commit().map_err(|e|e.to_string())?;
         Ok(checked)
     }).await.map_err(|e|e.to_string())?
 }
@@ -404,7 +409,7 @@ fn sync_disconnect(state: State<AppState>) -> Result<(),String> {
         Ok(())|Err(keyring::Error::NoEntry)=>{},
         Err(error)=>return Err(format!("Не удалось удалить токен из хранилища секретов: {error}")),
     }
-    state.db.lock().map_err(|e|e.to_string())?.execute("DELETE FROM preferences WHERE key='sync_server_url'",[]).map_err(|e|e.to_string())?;
+    state.db.lock().map_err(|e|e.to_string())?.execute("DELETE FROM preferences WHERE key IN ('sync_server_url','sync_last_etag')",[]).map_err(|e|e.to_string())?;
     Ok(())
 }
 
@@ -415,8 +420,12 @@ async fn sync_upload(app: tauri::AppHandle, path: String, password: String) -> R
         let decrypted=decrypted_backup_file(&archive_path,&password)?;
         std::fs::remove_file(decrypted).map_err(|e|format!("Не удалось удалить временную расшифрованную копию: {e}"))?;
         let archive=std::fs::read(&archive_path).map_err(|e|e.to_string())?;
-        let (url,token)=sync_credentials(&app.state::<AppState>())?;
-        sync_client::upload(&url,&token,archive)
+        let state=app.state::<AppState>();
+        let (url,token)=sync_credentials(&state)?;
+        let known:Option<String>=state.db.lock().map_err(|e|e.to_string())?.query_row("SELECT value FROM preferences WHERE key='sync_last_etag'",[],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+        let updated=sync_client::upload(&url,&token,archive,known.as_deref())?;
+        state.db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_last_etag',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![updated]).map_err(|e|e.to_string())?;
+        Ok(())
     }).await.map_err(|e|e.to_string())?
 }
 
@@ -425,13 +434,14 @@ async fn sync_download(app: tauri::AppHandle, path: String) -> Result<(),String>
     tauri::async_runtime::spawn_blocking(move || {
         let destination=portable_backup_path(&path,false)?;
         let (url,token)=sync_credentials(&app.state::<AppState>())?;
-        let archive=sync_client::download(&url,&token)?;
+        let (archive,etag)=sync_client::download(&url,&token)?;
         let mut file=create_private_file(&destination)?;
         if let Err(error)=file.write_all(&archive).and_then(|_|file.sync_all()) {
             drop(file);
             let _=std::fs::remove_file(&destination);
             return Err(error.to_string());
         }
+        app.state::<AppState>().db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_last_etag',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![etag]).map_err(|e|e.to_string())?;
         Ok(())
     }).await.map_err(|e|e.to_string())?
 }
@@ -440,22 +450,26 @@ async fn sync_download(app: tauri::AppHandle, path: String) -> Result<(),String>
 fn import_backup(state: State<AppState>, path: String) -> Result<BackupInfo, String> {
     if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() { return Err("Дождитесь завершения запроса к модели".into()); }
     let source_path = backup_path(&path,true)?;
-    import_backup_file(&state, &source_path)
+    import_backup_file(&state, &source_path, &app_dir()?)
 }
 
-fn import_backup_file(state: &AppState, source_path: &std::path::Path) -> Result<BackupInfo, String> {
+fn import_backup_file(state: &AppState, source_path: &std::path::Path, safety_dir: &std::path::Path) -> Result<BackupInfo, String> {
     let info = inspect_backup_file(&source_path)?;
     let source = Connection::open_with_flags(&source_path,OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e|e.to_string())?;
     let mut target = state.db.lock().map_err(|e|e.to_string())?;
     if is_live_database_path(&target,source_path) { return Err("Нельзя импортировать открытую базу приложения".into()); }
-    let safety_path = app_dir()?.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
+    let local_sync:Vec<(String,String)>=target.prepare("SELECT key,value FROM preferences WHERE key IN ('sync_server_url','sync_last_etag')").map_err(|e|e.to_string())?
+        .query_map([],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|e|e.to_string())?
+        .collect::<Result<_,_>>().map_err(|e|e.to_string())?;
+    let safety_path = safety_dir.join(format!("before-import-{}.sqlite3",uuid::Uuid::new_v4()));
     drop(create_private_file(&safety_path)?);
     let mut safety = Connection::open(&safety_path).map_err(|e|e.to_string())?;
     Backup::new(&target,&mut safety).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
     drop(safety);
     Backup::new(&source,&mut target).and_then(|backup|backup.run_to_completion(100,Duration::from_millis(10),None)).map_err(|e|e.to_string())?;
     migrate(&target)?;
-    target.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides')",[]).map_err(|e|e.to_string())?;
+    target.execute("DELETE FROM preferences WHERE key IN ('skill_directories','skill_overrides','sync_server_url','sync_last_etag')",[]).map_err(|e|e.to_string())?;
+    for (key,value) in local_sync {target.execute("INSERT INTO preferences(key,value) VALUES(?1,?2)",params![key,value]).map_err(|e|e.to_string())?;}
     Ok(info)
 }
 
@@ -1122,6 +1136,33 @@ mod tests {
         let mut tampered = encrypted;
         tampered[8] ^= 1;
         assert!(portable_backup::decrypt(&tampered, "long secret phrase").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn imported_learning_data_keeps_local_sync_connection_and_discards_remote_settings() {
+        let root=std::env::temp_dir().join(format!("educatio-import-sync-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source_path=root.join("source.sqlite3");
+        let source=Connection::open(&source_path).unwrap();
+        migrate(&source).unwrap();
+        source.execute("INSERT INTO learning_goals VALUES ('g','Source goal','t','t')",[]).unwrap();
+        source.execute("INSERT INTO preferences VALUES ('sync_server_url','https://wrong.example/')",[]).unwrap();
+        source.execute("INSERT INTO preferences VALUES ('sync_last_etag','wrong')",[]).unwrap();
+        source.execute("INSERT INTO preferences VALUES ('skill_directories','[\"/unsafe\"]')",[]).unwrap();
+        drop(source);
+        let target=Connection::open(root.join("target.sqlite3")).unwrap();
+        migrate(&target).unwrap();
+        target.execute("INSERT INTO preferences VALUES ('sync_server_url','https://local.example/')",[]).unwrap();
+        target.execute("INSERT INTO preferences VALUES ('sync_last_etag','local-etag')",[]).unwrap();
+        let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None)};
+        assert_eq!(import_backup_file(&state,&source_path,&root).unwrap().goals,1);
+        let db=state.db.lock().unwrap();
+        let value=|key:&str| db.query_row("SELECT value FROM preferences WHERE key=?1",params![key],|r|r.get::<_,String>(0)).optional().unwrap();
+        assert_eq!(value("sync_server_url").as_deref(),Some("https://local.example/"));
+        assert_eq!(value("sync_last_etag").as_deref(),Some("local-etag"));
+        assert_eq!(value("skill_directories"),None);
+        drop(db);
+        drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

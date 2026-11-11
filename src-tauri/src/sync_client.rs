@@ -43,12 +43,16 @@ pub fn status(base:&str,token:&str) -> Result<RemoteStatus,String> {
     remote_status(&client()?,&url,&auth)
 }
 
-pub fn upload(base:&str,token:&str,archive:Vec<u8>) -> Result<(),String> {
+pub fn upload(base:&str,token:&str,archive:Vec<u8>,expected_etag:Option<&str>) -> Result<String,String> {
     if archive.len()<52||archive.len()>MAX_ARCHIVE_BYTES||!archive.starts_with(b"EDUHBA01") { return Err("Выберите защищённый архив .ehb до 100 МБ".into()); }
     let url=endpoint(base)?;
     let auth=authorization(token)?;
     let client=client()?;
     let current=remote_status(&client,&url,&auth)?;
+    if current.has_archive && current.etag.as_deref()!=expected_etag {
+        return Err("Архив на сервере отличается от последней известной версии. Сначала скачайте его".into());
+    }
+    if !current.has_archive && expected_etag.is_some() {return Err("Архив на сервере исчез. Проверьте сервер перед отправкой".into());}
     let mut request=client.put(url).header(AUTHORIZATION,auth).header("content-type","application/octet-stream").body(archive);
     request=if current.has_archive {
         request.header(IF_MATCH,current.etag.ok_or("Сервер не вернул ETag для защиты от конфликтов")?)
@@ -56,14 +60,18 @@ pub fn upload(base:&str,token:&str,archive:Vec<u8>) -> Result<(),String> {
     let response=request.send().map_err(|e|format!("Не удалось отправить архив: {e}"))?;
     if response.headers().get("x-educatio-sync").and_then(|v|v.to_str().ok())!=Some("1") {return Err("Неверный ответ сервера educatioHarness".into());}
     match response.status() {
-        StatusCode::OK => Ok(()),
+        StatusCode::OK => response.headers().get(ETAG).and_then(|v|v.to_str().ok()).filter(|tag|valid_etag(tag)).map(str::to_owned).ok_or("Сервер не вернул ETag нового архива".into()),
         StatusCode::PRECONDITION_FAILED|StatusCode::CONFLICT => Err("Архив на сервере изменился. Сначала скачайте его и проверьте данные".into()),
         StatusCode::UNAUTHORIZED => Err("Сервер отклонил токен".into()),
         code => Err(format!("Не удалось отправить архив: HTTP {code}")),
     }
 }
 
-pub fn download(base:&str,token:&str) -> Result<Vec<u8>,String> {
+fn valid_etag(value:&str) -> bool {
+    value.len()==66 && value.starts_with('"') && value.ends_with('"') && value.as_bytes()[1..65].iter().all(u8::is_ascii_hexdigit)
+}
+
+pub fn download(base:&str,token:&str) -> Result<(Vec<u8>,String),String> {
     let url=endpoint(base)?;
     let auth=authorization(token)?;
     let response=client()?.get(url).header(AUTHORIZATION,auth).send().map_err(|e|format!("Сервер недоступен: {e}"))?;
@@ -74,11 +82,12 @@ pub fn download(base:&str,token:&str) -> Result<Vec<u8>,String> {
         StatusCode::UNAUTHORIZED => return Err("Сервер отклонил токен".into()),
         code => return Err(format!("Не удалось скачать архив: HTTP {code}")),
     }
+    let etag=response.headers().get(ETAG).and_then(|v|v.to_str().ok()).filter(|tag|valid_etag(tag)).ok_or("Сервер не вернул версию архива")?.to_owned();
     if response.content_length().is_some_and(|size|size>MAX_ARCHIVE_BYTES as u64) { return Err("Архив сервера превышает 100 МБ".into()); }
     let mut archive=Vec::new();
     response.take((MAX_ARCHIVE_BYTES+1) as u64).read_to_end(&mut archive).map_err(|e|e.to_string())?;
     if archive.len()<52||archive.len()>MAX_ARCHIVE_BYTES||!archive.starts_with(b"EDUHBA01") { return Err("Сервер вернул некорректный архив".into()); }
-    Ok(archive)
+    Ok((archive,etag))
 }
 
 #[cfg(test)]
@@ -126,13 +135,31 @@ mod tests {
                     assert_eq!(&data[header_end..],expected);
                 }
                 let body=if method=="GET" {expected.as_slice()} else {&[]};
-                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nX-Educatio-Sync: 1\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).unwrap();
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nETag: \"{}\"\r\nX-Educatio-Sync: 1\r\nConnection: close\r\n\r\n",body.len(),"a".repeat(64)).as_bytes()).unwrap();
                 stream.write_all(body).unwrap();
             }
         });
         let url=format!("http://127.0.0.1:{port}/");
-        upload(&url,token,archive.clone()).unwrap();
-        assert_eq!(download(&url,token).unwrap(),archive);
+        assert_eq!(upload(&url,token,archive.clone(),None).unwrap(),format!("\"{}\"","a".repeat(64)));
+        assert_eq!(download(&url,token).unwrap().0,archive);
+        server.join().unwrap();
+    }
+    #[test]
+    fn new_device_cannot_overwrite_existing_remote_archive_without_baseline() {
+        use std::{io::{Read,Write},net::TcpListener,thread};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let server=thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer=[0u8;2048];
+            let size=stream.read(&mut buffer).unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..size]).starts_with("HEAD "));
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"{}\"\r\nX-Educatio-Sync: 1\r\nConnection: close\r\n\r\n","a".repeat(64)).as_bytes()).unwrap();
+        });
+        let archive=[b"EDUHBA01".as_slice(),&[7u8;44]].concat();
+        let error=upload(&format!("http://127.0.0.1:{port}/"),"test-token-with-at-least-thirty-two-bytes",archive,None).unwrap_err();
+        assert!(error.contains("Сначала скачайте"));
         server.join().unwrap();
     }
 }

@@ -89,6 +89,7 @@ export function createSyncServer(directory:string, token:string) {
           await writeFile(temp,JSON.stringify(next),{flag:'wx',mode:0o600});
           await rename(temp,join(dataDirectory,'current.json'));
         } catch(error) {await unlink(temp).catch(()=>{});throw error}
+        response.setHeader('etag',`"${sha256}"`);
         return reply(response,200,{sha256,bytes:archive.length});
       } finally {uploading=false}
     } catch(error) {
