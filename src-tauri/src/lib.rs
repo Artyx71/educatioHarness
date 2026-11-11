@@ -297,8 +297,12 @@ fn decrypted_backup_file(app: &tauri::AppHandle, path: &std::path::Path, passwor
 }
 
 fn decrypted_backup_bytes(app: &tauri::AppHandle, archive:&[u8], password: &str) -> Result<PathBuf, String> {
+    decrypted_backup_bytes_at(&app_dir(app)?,archive,password)
+}
+
+fn decrypted_backup_bytes_at(directory:&std::path::Path, archive:&[u8], password:&str) -> Result<PathBuf,String> {
     let mut plaintext = portable_backup::decrypt(archive, password)?;
-    let temporary = app_dir(app)?.join(format!(".import-{}.sqlite3", uuid::Uuid::new_v4()));
+    let temporary = directory.join(format!(".import-{}.sqlite3", uuid::Uuid::new_v4()));
     let result = (|| {
         use std::io::Write;
         let mut file = create_private_file(&temporary)?;
@@ -540,13 +544,17 @@ async fn sync_import_current(app:tauri::AppHandle,password:String) -> Result<Bac
         if !state.runs.lock().map_err(|e|e.to_string())?.is_empty() {return Err("Дождитесь завершения запроса к модели".into());}
         let (url,token)=sync_credentials(&state)?;
         let (archive,etag)=sync_client::download(&url,&token)?;
-        let temporary=decrypted_backup_bytes(&app,&archive,&password)?;
-        let result=import_backup_file(&state,&temporary,&app_dir(&app)?);
-        let _=std::fs::remove_file(&temporary);
-        let info=result?;
+        let info=import_encrypted_database(&state,&app_dir(&app)?,&archive,&password)?;
         state.db.lock().map_err(|e|e.to_string())?.execute("INSERT INTO preferences(key,value) VALUES('sync_last_etag',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![etag]).map_err(|e|e.to_string())?;
         Ok(info)
     }).await.map_err(|e|e.to_string())?
+}
+
+fn import_encrypted_database(state:&AppState,directory:&std::path::Path,archive:&[u8],password:&str) -> Result<BackupInfo,String> {
+    let temporary=decrypted_backup_bytes_at(directory,archive,password)?;
+    let result=import_backup_file(state,&temporary,directory);
+    let _=std::fs::remove_file(&temporary);
+    result
 }
 
 #[tauri::command]
@@ -1320,6 +1328,31 @@ mod tests {
         let restored=root.join("restored.sqlite3");
         std::fs::write(&restored,portable_backup::decrypt(&archive,"long secret phrase").unwrap()).unwrap();
         assert_eq!(inspect_backup_file(&restored).unwrap().goals,1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn server_archive_import_replaces_data_only_after_validation_and_saves_backup() {
+        let root=std::env::temp_dir().join(format!("educatio-server-import-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let source=Connection::open_in_memory().unwrap();
+        migrate(&source).unwrap();
+        source.execute("INSERT INTO learning_goals VALUES ('new','Новая цель','now','now')",[]).unwrap();
+        let (archive,_)=encrypted_database_from_connection(&source,&root,"long secret phrase").unwrap();
+        let target=Connection::open(root.join("target.sqlite3")).unwrap();
+        migrate(&target).unwrap();
+        target.execute("INSERT INTO learning_goals VALUES ('old','Старая цель','now','now')",[]).unwrap();
+        target.execute("INSERT INTO preferences VALUES ('sync_server_url','https://local.example/')",[]).unwrap();
+        let state=AppState {db:Mutex::new(target),startup_error:None,runs:Arc::new(Mutex::new(HashMap::new())),api_key_saved:Mutex::new(None),#[cfg(mobile)] sync_token:Mutex::new(None)};
+        assert!(import_encrypted_database(&state,&root,&archive,"wrong secret phrase").is_err());
+        assert_eq!(state.db.lock().unwrap().query_row("SELECT title FROM learning_goals WHERE id='old'",[],|r|r.get::<_,String>(0)).unwrap(),"Старая цель");
+        assert_eq!(import_encrypted_database(&state,&root,&archive,"long secret phrase").unwrap().goals,1);
+        let current=state.db.lock().unwrap();
+        assert_eq!(current.query_row("SELECT title FROM learning_goals WHERE id='new'",[],|r|r.get::<_,String>(0)).unwrap(),"Новая цель");
+        assert_eq!(current.query_row("SELECT value FROM preferences WHERE key='sync_server_url'",[],|r|r.get::<_,String>(0)).unwrap(),"https://local.example/");
+        drop(current);
+        let backups:Vec<PathBuf>=std::fs::read_dir(&root).unwrap().map(|entry|entry.unwrap().path()).filter(|path|path.file_name().unwrap().to_string_lossy().starts_with("before-import-")).collect();
+        assert_eq!(backups.len(),1);
+        assert_eq!(inspect_backup_file(&backups[0]).unwrap().goals,1);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
