@@ -10,7 +10,7 @@ const fake = vi.hoisted(() => ({
 
 vi.mock('../src/lib/api', () => ({ api: fake, id: () => crypto.randomUUID(), now: () => new Date().toISOString() }));
 
-import { finishProbe, generateExercise, startLearningSession, teach } from '../src/features/learning/engine';
+import { finishProbe, generateExercise, retryKnowledgeExtraction, startLearningSession, teach } from '../src/features/learning/engine';
 
 describe('learning workflow recovery', () => {
   beforeEach(() => {
@@ -152,6 +152,39 @@ describe('learning workflow recovery', () => {
     await teach('goal','session',{id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'Адреса памяти',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0},{provider:'codex',model:'default'});
     expect(fake.save).toHaveBeenCalledWith('knowledge_topic_links',{node_id:'existing',topic_id:'topic'});
     expect(fake.save.mock.calls.filter(([table])=>table==='knowledge_nodes')).toHaveLength(0);
+  });
+
+  it('keeps a failed graph extraction visible and retries it without regenerating the lesson', async () => {
+    const snapshot=await fake.snapshot();
+    snapshot.workflow_executions.push({id:'goal:curriculum',status:'completed'} as Snapshot['workflow_executions'][number]);
+    const topic={id:'topic',curriculum_id:'partial-plan',title:'Указатели',description:'',objectives:'[]',prerequisites:'[]',difficulty:'beginner',status:'pending',position:0};
+    snapshot.topics=[topic];
+    fake.agent.mockImplementation(async (operation:string) => {
+      if(operation==='teach') return {message:'Указатель хранит адрес.',question:'Что это означает?',questionType:'check',topicId:'topic',phase:'teach',_execution:{durationMs:1}};
+      if(operation==='extract') throw new Error('Сеть недоступна');
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    await teach('goal','session',topic,{provider:'codex',model:'default'});
+    const created=fake.save.mock.calls.find(([table,record])=>table==='messages'&&record.kind==='teaching')?.[1];
+    expect(created).toBeTruthy();
+    const failed=snapshot.workflow_executions.find(step=>step.id===`${created.id}:extract`);
+    expect(failed?.status).toBe('failed');
+    expect(failed?.error).toContain('Сеть недоступна');
+    snapshot.messages.push(created);
+    fake.agent.mockImplementation(async (operation:string) => {
+      if(operation==='extract') return {propositions:[],chains:[],_execution:{durationMs:1}};
+      throw new Error(`Unexpected operation: ${operation}`);
+    });
+    await retryKnowledgeExtraction('goal','session',{provider:'codex',model:'default'});
+    expect(snapshot.workflow_executions.find(step=>step.id===`${created.id}:extract`)?.status).toBe('completed');
+    expect(fake.agent.mock.calls.filter(([operation])=>operation==='teach')).toHaveLength(1);
+    expect(fake.agent.mock.calls.filter(([operation])=>operation==='extract')).toHaveLength(2);
+    // A process crash leaves the persisted state as `running`; reopening must
+    // allow the learner to retry the saved message as well.
+    snapshot.workflow_executions.find(step=>step.id===`${created.id}:extract`)!.status='running';
+    await retryKnowledgeExtraction('goal','session',{provider:'codex',model:'default'});
+    expect(snapshot.workflow_executions.find(step=>step.id===`${created.id}:extract`)?.status).toBe('completed');
+    expect(fake.agent.mock.calls.filter(([operation])=>operation==='extract')).toHaveLength(3);
   });
 
   it('uses only attempts for the selected topic when generating practice', async () => {

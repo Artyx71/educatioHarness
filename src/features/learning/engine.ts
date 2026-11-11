@@ -184,7 +184,38 @@ export async function teach(goalId:string,sessionId:string,topic:Topic,config:Co
   await api.save('topics',{...topic,status:'in_progress',position:String(topic.position)});
   const session=snap.sessions.find(item=>item.id===sessionId);
   if(session) await api.save('sessions',{...session,updated_at:now()});
-  await extract(goalId,sessionId,topic.id,[created],config).catch(()=>{});
+  // Teaching is already visible to the learner. A graph failure must not erase
+  // that response, but it must remain visible and retryable after a restart.
+  await extractTeachingMessage(goalId,sessionId,topic.id,created,config).catch(()=>{});
+}
+
+async function extractTeachingMessage(goalId:string,sessionId:string,topicId:string,created:{id:string;content:string},config:Config) {
+  const step={goalId,sessionId,instanceId:created.id,stepId:'extract',input:{messageId:created.id,topicId},metadata:{workflow:'learning'}};
+  await transitionWorkflow({...step,status:'running'});
+  try {
+    await extract(goalId,sessionId,topicId,[created],config);
+    await transitionWorkflow({...step,status:'completed',output:{messageId:created.id}});
+  } catch(error) {
+    await transitionWorkflow({...step,status:'failed',error:String(error)});
+    throw error;
+  }
+}
+
+export async function retryKnowledgeExtraction(goalId:string,sessionId:string,config:Config) {
+  const snap=await api.snapshot();
+  // A `running` step after reopening the app was interrupted by shutdown.
+  const failed=snap.workflow_executions.filter(step=>step.goal_id===goalId&&step.session_id===sessionId&&step.step_id==='extract'&&['failed','running'].includes(step.status));
+  if(!failed.length) return;
+  for(const step of failed) {
+    const created=snap.messages.find(item=>`${item.id}:extract`===step.id&&item.session_id===sessionId&&item.role==='assistant'&&item.kind==='teaching');
+    if(!created) throw new Error('Не найдено сохранённое сообщение для повторного извлечения знаний');
+    let topicId:string;
+    try { topicId=(JSON.parse(step.input) as {topicId:string}).topicId; }
+    catch { throw new Error('Повреждён вход шага извлечения знаний'); }
+    if(!snap.topics.some(item=>item.id===topicId&&snap.curricula.some(plan=>plan.id===item.curriculum_id&&plan.goal_id===goalId)))
+      throw new Error('Тема исходного сообщения больше не существует');
+    await extractTeachingMessage(goalId,sessionId,topicId,created,config);
+  }
 }
 
 async function extract(goalId:string,sessionId:string,topicId:string,messages:{id:string;content:string}[],config:Config) {
