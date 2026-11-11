@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "identifier": "dev.educatioharness.app",
   "build": {"beforeDevCommand":"npm run runtime:bundle && npm run dev","devUrl":"http://localhost:1420","beforeBuildCommand":"npm run build","frontendDist":"../dist"},
-  "app": {"windows":[{"title":"educatioHarness","width":1320,"height":850,"minWidth":960,"minHeight":600}],"security":{"csp":"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"}},
+  "app": {"windows":[{"title":"educatioHarness","width":1320,"height":850,"minWidth":340,"minHeight":520}],"security":{"csp":"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"}},
   "bundle":{"active":true,"targets":["deb","appimage"],"icon":["icons/icon.png","icons/32x32.png","icons/128x128.png","icons/icon.icns","icons/icon.ico"],"externalBin":["binaries/educatioharness-node","binaries/educatioharness-codex"],"resources":{"../agent-runtime/bundle/main.mjs":"agent-runtime/main.mjs","../skills/":"skills/"}}
 }

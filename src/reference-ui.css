@@ -112,4 +112,34 @@ select option{background-color:var(--field-bg);color:var(--field-text)}
 .graph-filters{display:flex;gap:8px;align-items:center}.graph-filters select{width:min(210px,26vw)}.graph-filters input{width:min(230px,26vw)}
 @media(max-width:900px){.graph-page>.section-head{align-items:stretch;flex-direction:column}.graph-filters select,.graph-filters input{width:50%;max-width:none!important}}
 @media(max-width:800px){.topic-dashboard,.activity-dashboard,.review-prompt{width:min(390px,calc(100vw - 220px))}.answer-toolbar span:last-child{display:none}}
+.mobile-nav,.mobile-plan-button,.mobile-plan-backdrop,.mobile-plan-close{display:none}
+@media(max-width:640px){
+  .app{height:100dvh;flex-direction:column}
+  .ref-sidebar{display:none}
+  .main{flex:1;min-height:0;width:100%}
+  .mobile-nav{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));flex:none;min-height:calc(60px + env(safe-area-inset-bottom));padding:3px 4px env(safe-area-inset-bottom);background:#171717;border-top:1px solid #363636;z-index:40}
+  .mobile-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:0;padding:5px 1px;border:0;border-radius:6px;background:transparent;color:#888;font-size:9px}
+  .mobile-nav button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+  .mobile-nav button[aria-current="page"]{background:#292929;color:#eee}
+  .page{padding:23px 16px}.page h1{font-size:25px}
+  .reference-home{height:auto;min-height:calc(100dvh - 60px - env(safe-area-inset-bottom));padding:24px 16px 158px;display:flex}
+  .home-summary{width:100%}.home-summary h1{font-size:26px;margin-top:25px}
+  .home-graph-link{display:none}
+  .topic-dashboard,.activity-dashboard,.review-prompt{width:min(390px,100%)}
+  .home-composer{width:calc(100% - 28px);bottom:12px}.home-input textarea{font-size:16px;min-height:48px;padding:10px 9px}
+  .section-head{align-items:flex-start;flex-direction:column}.section-head>.button{width:100%}
+  .graph-page{padding:16px}.graph-page h1{font-size:25px}.graph-filters{flex-wrap:wrap;width:100%}.graph-filters select,.graph-filters input:not([type="checkbox"]):not([type="radio"]){width:100%;max-width:none!important}.graph-detail{right:8px;top:8px;width:min(275px,calc(100% - 16px))}
+  .review-page .practice-layout,.practice-layout{grid-template-columns:1fr}.review-progress{display:flex;flex-wrap:wrap;gap:4px}.review-progress>.eyebrow,.review-progress>p{width:100%}.review-progress button{width:auto;min-width:90px;border:1px solid #383838;border-radius:5px}
+  .learn-page{position:relative;overflow:hidden}
+  .learn-page .curriculum{display:block;position:absolute;inset:0 auto 0 0;width:min(340px,88vw);height:100%;max-height:none;z-index:31;transform:translateX(-105%);transition:transform .18s ease;box-shadow:12px 0 35px #0008}
+  .learn-page .curriculum.mobile-open{transform:translateX(0)}
+  .curriculum-head .icon-button{margin-left:auto}.mobile-plan-close{display:inline-flex;align-items:center;justify-content:center;width:25px;height:25px;margin-left:6px;border:1px solid #444;border-radius:5px;background:#222;color:#ccc;font-size:17px}
+  .mobile-plan-backdrop{display:block;position:absolute;inset:0;z-index:30;border:0;background:#0009}
+  .conversation{width:100%;height:100%}.conversation-head{height:65px;padding:10px 14px;gap:8px}.conversation-head h1{font-size:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:calc(100vw - 100px)}.conversation-head .chip{display:none}
+  .mobile-plan-button{display:inline-flex;margin-left:auto;padding:6px 10px;border:1px solid #464646;border-radius:6px;background:#252525;color:#ddd;font-size:11px}
+  .conversation-scroll{padding:16px}.start-goal{margin:25px auto}.probe-question{padding:16px 0}.probe-question h3{font-size:15px}
+  .composer{padding:9px 12px;gap:7px;flex-direction:column;align-items:stretch}.composer textarea{min-height:50px;max-height:110px}.composer .button{width:100%;height:35px}
+  input:not([type="checkbox"]):not([type="radio"]),textarea,select{font-size:16px}
+  .settings-grid{grid-template-columns:1fr}.settings-grid .panel{padding:17px}.model-toggle button{padding:8px 6px}
+}
 @media(prefers-reduced-motion:reduce){.study-card,.study-card.revealed{animation:none;transition:none}}
