@@ -1,8 +1,10 @@
-use reqwest::{blocking::Client, header::{AUTHORIZATION, ETAG, IF_MATCH, IF_NONE_MATCH}, redirect::Policy, StatusCode, Url};
+use reqwest::{blocking::Client, header::{AUTHORIZATION, ETAG, IF_MATCH, IF_NONE_MATCH}, redirect::Policy, Client as AsyncClient, StatusCode, Url};
 use serde::Serialize;
+use serde_json::Value;
 use std::{io::Read, time::Duration};
 
 const MAX_ARCHIVE_BYTES: usize = 100_000_052;
+const MAX_AGENT_RESPONSE_BYTES: usize = 2_000_000;
 
 #[derive(Serialize)]
 pub struct RemoteStatus { pub has_archive: bool, pub etag: Option<String> }
@@ -41,6 +43,37 @@ pub fn status(base:&str,token:&str) -> Result<RemoteStatus,String> {
     let url=endpoint(base)?;
     let auth=authorization(token)?;
     remote_status(&client()?,&url,&auth)
+}
+
+pub async fn agent(base:&str,token:&str,payload:&Value) -> Result<Value,String> {
+    let mut url=endpoint(base)?;
+    url.set_path("/v1/agent");
+    let auth=authorization(token)?;
+    let client=AsyncClient::builder().no_proxy().no_gzip().no_brotli().no_deflate().no_zstd()
+        .redirect(Policy::none()).timeout(Duration::from_secs(185)).build().map_err(|e|e.to_string())?;
+    let mut response=client.post(url).header(AUTHORIZATION,auth).json(payload).send().await
+        .map_err(|e|format!("Сервер ИИ недоступен: {e}"))?;
+    if response.headers().get("x-educatio-sync").and_then(|v|v.to_str().ok())!=Some("1") {
+        return Err("Адрес не ведёт на сервер educatioHarness".into());
+    }
+    let status=response.status();
+    if response.content_length().is_some_and(|length|length>MAX_AGENT_RESPONSE_BYTES as u64) {
+        return Err("Ответ сервера ИИ слишком велик".into());
+    }
+    let mut bytes=Vec::new();
+    while let Some(chunk)=response.chunk().await.map_err(|e|format!("Ошибка чтения ответа сервера ИИ: {e}"))? {
+        if bytes.len()+chunk.len()>MAX_AGENT_RESPONSE_BYTES {return Err("Ответ сервера ИИ слишком велик".into());}
+        bytes.extend_from_slice(&chunk);
+    }
+    let value:Value=serde_json::from_slice(&bytes).map_err(|_|"Сервер ИИ вернул некорректный JSON".to_string())?;
+    if status!=StatusCode::OK {
+        let message=value.get("error").and_then(Value::as_str).unwrap_or("Ошибка сервера ИИ");
+        return Err(format!("{message} (HTTP {status})"));
+    }
+    if !value.is_object() || !value.get("_execution").is_some_and(Value::is_object) {
+        return Err("Сервер ИИ вернул ответ без метаданных выполнения".into());
+    }
+    Ok(value)
 }
 
 pub fn upload(base:&str,token:&str,archive:Vec<u8>,expected_etag:Option<&str>) -> Result<String,String> {
@@ -160,6 +193,40 @@ mod tests {
         let archive=[b"EDUHBA01".as_slice(),&[7u8;44]].concat();
         let error=upload(&format!("http://127.0.0.1:{port}/"),"test-token-with-at-least-thirty-two-bytes",archive,None).unwrap_err();
         assert!(error.contains("Сначала скачайте"));
+        server.join().unwrap();
+    }
+    #[tokio::test]
+    async fn remote_agent_sends_authenticated_operation_and_reads_structured_result() {
+        use std::{io::{Read,Write},net::TcpListener,thread};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let port=listener.local_addr().unwrap().port();
+        let server=thread::spawn(move || {
+            let (mut stream,_)=listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut data=Vec::new();
+            let mut chunk=[0u8;4096];
+            let header_end=loop {
+                let count=stream.read(&mut chunk).unwrap();
+                assert!(count>0);
+                data.extend_from_slice(&chunk[..count]);
+                if let Some(position)=data.windows(4).position(|window|window==b"\r\n\r\n") {break position+4}
+            };
+            let header=String::from_utf8_lossy(&data[..header_end]).to_ascii_lowercase();
+            assert!(header.starts_with("post /v1/agent "));
+            assert!(header.contains("authorization: bearer test-token-with-at-least-thirty-two-bytes"));
+            let length:usize=header.lines().find_map(|line|line.strip_prefix("content-length: ")).unwrap().trim().parse().unwrap();
+            while data.len()-header_end<length {
+                let count=stream.read(&mut chunk).unwrap();
+                assert!(count>0);
+                data.extend_from_slice(&chunk[..count]);
+            }
+            let request:Value=serde_json::from_slice(&data[header_end..header_end+length]).unwrap();
+            assert_eq!(request["operation"],"validate");
+            let body=r#"{"connected":true,"message":"ok","_execution":{"durationMs":3}}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nX-Educatio-Sync: 1\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).unwrap();
+        });
+        let result=agent(&format!("http://127.0.0.1:{port}/"),"test-token-with-at-least-thirty-two-bytes",&serde_json::json!({"operation":"validate","model":"gpt-6-luna","input":{}})).await.unwrap();
+        assert_eq!(result["connected"],true);
         server.join().unwrap();
     }
 }

@@ -665,7 +665,7 @@ fn delete_record_db(db: &Connection, table: &str, id: &str) -> Result<(), String
 }
 
 #[derive(Serialize)]
-struct AuthStatus { codex_installed: bool, codex_authenticated: bool, api_key_saved: bool, detail: String }
+struct AuthStatus { codex_installed: bool, codex_authenticated: bool, api_key_saved: bool, server_configured: bool, detail: String }
 
 fn codex_logged_in(success: bool, stdout: &str, stderr: &str) -> bool {
     success && (stdout.trim().starts_with("Logged in") || stderr.trim().starts_with("Logged in"))
@@ -705,7 +705,8 @@ fn auth_status(app: tauri::AppHandle, state: State<AppState>) -> AuthStatus {
     let saved = cached_api_key_status(&state.api_key_saved, || {
         keyring::Entry::new("educatio-harness", "openai-api-key").ok().and_then(|entry|entry.get_password().ok()).is_some()
     });
-    AuthStatus { codex_installed: installed, codex_authenticated: authenticated, api_key_saved: saved, detail }
+    let server_configured=sync_credentials(&state).is_ok();
+    AuthStatus { codex_installed: installed, codex_authenticated: authenticated, api_key_saved: saved, server_configured, detail }
 }
 
 #[tauri::command]
@@ -799,8 +800,25 @@ async fn agent_call(app: tauri::AppHandle, request: AgentRequest) -> Result<Valu
 async fn execute_agent(app: tauri::AppHandle, request: AgentRequest, key_override: Option<String>) -> Result<Value, String> {
     if request.request_id.len() > 64 || request.request_id.is_empty() || !request.request_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { return Err("Invalid request ID".into()); }
     if !["probe","evaluate_probe","curriculum","teach","practice","evaluate_practice","extract","audit","validate"].contains(&request.operation.as_str()) { return Err("Invalid operation".into()); }
-    if !["codex","openai"].contains(&request.provider.as_str()) { return Err("Invalid provider".into()); }
+    if !["codex","openai","server"].contains(&request.provider.as_str()) { return Err("Invalid provider".into()); }
     if request.model.len() > 100 || request.skill.len() > 80 || request.input.to_string().len() > 200_000 { return Err("Request too large".into()); }
+    if request.provider == "server" {
+        let (url,token)=sync_credentials(&app.state::<AppState>())?;
+        let payload=json!({"operation":request.operation,"model":request.model,"input":request.input,"sessionId":request.session_id});
+        let runs=app.state::<AppState>().runs.clone();
+        let cancelled=Arc::new(AtomicBool::new(false));
+        {
+            let mut active=runs.lock().map_err(|e|e.to_string())?;
+            if active.contains_key(&request.request_id) {return Err("Request ID is already active".into());}
+            active.insert(request.request_id.clone(),cancelled.clone());
+        }
+        let outcome=tokio::select! {
+            result=sync_client::agent(&url,&token,&payload)=>result,
+            _=async {loop {if cancelled.load(Ordering::Relaxed) {break;} tokio::time::sleep(Duration::from_millis(100)).await;}}=>Err("Запрос отменён".into()),
+        };
+        runs.lock().map_err(|e|e.to_string())?.remove(&request.request_id);
+        return outcome;
+    }
     let key = if request.provider == "openai" { Some(match key_override { Some(candidate) => candidate, None => keyring::Entry::new("educatio-harness", "openai-api-key").map_err(|e|e.to_string())?.get_password().map_err(|_|"No API key saved".to_string())? }) } else { None };
     let resource = app.path().resource_dir().map_err(|e|e.to_string())?;
     let bundled = resource.join("agent-runtime/main.mjs");
