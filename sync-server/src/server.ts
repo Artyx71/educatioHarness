@@ -1,7 +1,7 @@
 import {createHash, timingSafeEqual, randomUUID} from 'node:crypto';
 import {createServer, type IncomingMessage, type ServerResponse} from 'node:http';
 import {lstat, mkdir, readFile, rename, unlink, writeFile} from 'node:fs/promises';
-import {resolve, join, isAbsolute} from 'node:path';
+import {resolve, join, isAbsolute, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {classifyAgentFailure, executeAgent, type AgentConfig} from './agent.js';
 
@@ -121,7 +121,7 @@ export function createSyncServer(directory:string, token:string, agentConfig?:Ag
       const message=error instanceof Error?error.message:'Unexpected error';
       const badInput=message.includes('Archive exceeds')||message.includes('Not an educatioHarness')||message.includes('Agent request exceeds')||message.includes('Invalid agent');
       const isAgent=request.url==='/v1/agent';
-      const failure=isAgent?classifyAgentFailure(message):{status:500,error:'Server error'};
+      const failure=isAgent?classifyAgentFailure(message,agentConfig?.provider):{status:500,error:'Server error'};
       if(!response.headersSent) reply(response,badInput?400:failure.status,{error:badInput?message:failure.error});
     }
   });
@@ -137,8 +137,23 @@ async function main() {
   const port=Number(process.env.EDUCATIO_SYNC_PORT??8787);
   if (!Number.isInteger(port)||port<1||port>65535) throw new Error('Invalid EDUCATIO_SYNC_PORT');
   const agentKey=process.env.EDUCATIO_AGENT_API_KEY;
+  const agentProvider=process.env.EDUCATIO_AGENT_PROVIDER??(agentKey?'openai':'none');
   const base=resolve(fileURLToPath(import.meta.url),'../../..');
-  const agentConfig=agentKey?{apiKey:agentKey,runtimePath:join(base,'agent-runtime/dist/main.js'),skillsDir:join(base,'skills')}:undefined;
+  const runtimePath=join(base,'agent-runtime/dist/main.js');
+  const skillsDir=join(base,'skills');
+  let agentConfig:AgentConfig|undefined;
+  if(agentProvider==='openai') {
+    if(!agentKey) throw new Error('Set EDUCATIO_AGENT_API_KEY for OpenAI server mode');
+    agentConfig={provider:'openai',apiKey:agentKey,runtimePath,skillsDir};
+  } else if(agentProvider==='codex') {
+    const workspaceDir=process.env.EDUCATIO_AGENT_WORKSPACE;
+    if(!workspaceDir||!isAbsolute(workspaceDir)||resolve(workspaceDir)===resolve(directory)||resolve(workspaceDir).startsWith(`${resolve(directory)}${sep}`))
+      throw new Error('Set EDUCATIO_AGENT_WORKSPACE to a separate absolute directory outside sync data');
+    if(!(await lstat(workspaceDir)).isDirectory()) throw new Error('EDUCATIO_AGENT_WORKSPACE must be a directory');
+    const codexPath=process.env.EDUCATIO_AGENT_CODEX_PATH;
+    if(codexPath&&(!isAbsolute(codexPath)||!(await lstat(codexPath)).isFile())) throw new Error('EDUCATIO_AGENT_CODEX_PATH must be an executable file');
+    agentConfig={provider:'codex',runtimePath,skillsDir,workspaceDir,codexPath};
+  } else if(agentProvider!=='none') throw new Error('EDUCATIO_AGENT_PROVIDER must be openai, codex, or none');
   const server=createSyncServer(directory,token,agentConfig);
   server.listen(port,'127.0.0.1',()=>process.stdout.write(`educatioHarness sync server listening on 127.0.0.1:${port}\n`));
 }

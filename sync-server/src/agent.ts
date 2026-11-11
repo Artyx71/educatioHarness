@@ -1,5 +1,6 @@
 import {spawn} from 'node:child_process';
-import {existsSync} from 'node:fs';
+import {existsSync,lstatSync} from 'node:fs';
+import {isAbsolute} from 'node:path';
 import {z} from 'zod';
 
 const skills={
@@ -15,8 +16,14 @@ const Payload=z.object({
   sessionId:z.string().max(256).nullable().optional(),
 }).strict();
 
-export type AgentConfig={apiKey:string;runtimePath:string;skillsDir:string};
-export function classifyAgentFailure(message:string):{status:number;error:string} {
+type AgentProvider='openai'|'codex';
+export type AgentConfig={runtimePath:string;skillsDir:string}&(
+  | {provider:'openai';apiKey:string}
+  | {provider:'codex';workspaceDir:string;codexPath?:string}
+);
+export function classifyAgentFailure(message:string,provider:AgentProvider='openai'):{status:number;error:string} {
+  if (provider==='codex'&&/not logged in|not authenticated|login required|authentication required|\b401\b|unauthorized/i.test(message))
+    return {status:401,error:'Codex CLI на сервере не авторизован. Под тем же пользователем выполните codex login status и codex login.'};
   if (message.includes('Country, region, or territory not supported') || message.includes('unsupported_country_region_territory'))
     return {status:403,error:'OpenAI API недоступен в регионе сервера. Выберите сервер в поддерживаемом регионе или используйте ChatGPT через Codex на компьютере.'};
   if (message.includes('401') || message.includes('invalid_api_key'))
@@ -27,20 +34,29 @@ export function classifyAgentFailure(message:string):{status:number;error:string
     return {status:504,error:'Время ожидания ответа модели истекло.'};
   return {status:502,error:'Не удалось получить ответ модели на сервере.'};
 }
-export function validateAgentRequest(raw:unknown) {
+export function validateAgentRequest(raw:unknown,provider:AgentProvider='openai') {
   const parsed=Payload.safeParse(raw);
   if (!parsed.success) throw new Error('Invalid agent request');
   const data=parsed.data;
-  return {operation:data.operation,provider:'openai',model:data.model,input:data.input,skill:skills[data.operation],skillDirectories:[],sessionId:data.sessionId??null};
+  return {operation:data.operation,provider,model:data.model,input:data.input,skill:skills[data.operation],skillDirectories:[],sessionId:data.sessionId??null};
 }
 
 export async function executeAgent(raw:unknown,config:AgentConfig,signal?:AbortSignal):Promise<unknown> {
-  const request=validateAgentRequest(raw);
-  if (!config.apiKey||!existsSync(config.runtimePath)) throw new Error('Agent provider is not configured on the server');
+  const request=validateAgentRequest(raw,config.provider);
+  if (!existsSync(config.runtimePath) || (config.provider==='openai'&&!config.apiKey)) throw new Error('Agent provider is not configured on the server');
+  if(config.provider==='codex'&&(!isAbsolute(config.workspaceDir)||!existsSync(config.workspaceDir)||!lstatSync(config.workspaceDir).isDirectory())) throw new Error('Agent workspace is not a directory');
   return new Promise((resolve,reject)=>{
+    const env:NodeJS.ProcessEnv={PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,EDUCATIOHARNESS_SKILLS_DIR:config.skillsDir};
+    if(config.provider==='openai') env.OPENAI_API_KEY=config.apiKey;
+    else {
+      env.EDUCATIOHARNESS_AGENT_WORKSPACE=config.workspaceDir;
+      if(config.codexPath) env.EDUCATIOHARNESS_CODEX_PATH=config.codexPath;
+      for(const name of ['HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','http_proxy','https_proxy','all_proxy','no_proxy','CODEX_CA_CERTIFICATE','SSL_CERT_FILE','DBUS_SESSION_BUS_ADDRESS','XDG_RUNTIME_DIR'] as const)
+        if(process.env[name]) env[name]=process.env[name];
+    }
     const child=spawn(process.execPath,[config.runtimePath],{
-      cwd:config.skillsDir,
-      env:{PATH:process.env.PATH,HOME:process.env.HOME,OPENAI_API_KEY:config.apiKey,EDUCATIOHARNESS_SKILLS_DIR:config.skillsDir},
+      cwd:config.provider==='codex'?config.workspaceDir:config.skillsDir,
+      env,
       stdio:['pipe','pipe','pipe'],
     });
     let output='';let stderr='';let settled=false;

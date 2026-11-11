@@ -53,7 +53,7 @@ test('agent endpoint requires token and returns an actionable regional error',as
   const token=randomBytes(32).toString('hex');
   const runtimePath=join(directory,'agent.mjs');
   await writeFile(runtimePath,"process.stdout.write(JSON.stringify({type:'result',ok:false,error:'403 Country, region, or territory not supported'})+'\\n')");
-  const server=createSyncServer(directory,token,{apiKey:'test-key',runtimePath,skillsDir:directory});
+  const server=createSyncServer(directory,token,{provider:'openai',apiKey:'test-key',runtimePath,skillsDir:directory});
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
   const address=server.address();
   assert(address&&typeof address==='object');
@@ -67,5 +67,30 @@ test('agent endpoint requires token and returns an actionable regional error',as
   } finally {
     await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
     await rm(directory,{recursive:true,force:true});
+  }
+});
+
+test('Codex endpoint keeps provider selection on the server',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'educatio-codex-http-'));
+  const workspace=await mkdtemp(join(tmpdir(),'educatio-codex-workspace-'));
+  const token=randomBytes(32).toString('hex');
+  const runtimePath=join(directory,'agent.mjs');
+  await writeFile(runtimePath,`let input='';process.stdin.on('data',chunk=>input+=chunk);process.stdin.on('end',()=>{const request=JSON.parse(input);process.stdout.write(JSON.stringify({type:'result',ok:true,data:{provider:request.provider,skill:request.skill,hasApiKey:!!process.env.OPENAI_API_KEY}})+'\\n')})`);
+  const server=createSyncServer(directory,token,{provider:'codex',runtimePath,skillsDir:directory,workspaceDir:workspace});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const address=server.address();
+  assert(address&&typeof address==='object');
+  const url=`http://127.0.0.1:${address.port}/v1/agent`;
+  const headers={authorization:`Bearer ${token}`,'content-type':'application/json'};
+  try {
+    const result=await fetch(url,{method:'POST',headers,body:JSON.stringify({operation:'probe',model:'default',input:{goal:'C'}})});
+    assert.equal(result.status,200);
+    assert.deepEqual(await result.json(),{provider:'codex',skill:'knowledge-probe',hasApiKey:false});
+    const override=await fetch(url,{method:'POST',headers,body:JSON.stringify({operation:'probe',provider:'openai',model:'default',input:{goal:'C'}})});
+    assert.equal(override.status,400);
+  } finally {
+    await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));
+    await rm(directory,{recursive:true,force:true});
+    await rm(workspace,{recursive:true,force:true});
   }
 });
