@@ -22,7 +22,9 @@ test('trusted server selects Codex without forwarding an API key or client provi
   await writeFile(runtimePath,`let input='';process.stdin.on('data',chunk=>input+=chunk);process.stdin.on('end',()=>{const request=JSON.parse(input);process.stdout.write(JSON.stringify({type:'result',ok:true,data:{provider:request.provider,skill:request.skill,hasApiKey:!!process.env.OPENAI_API_KEY,workspace:process.env.EDUCATIOHARNESS_AGENT_WORKSPACE,cwd:process.cwd()}})+'\\n')})`);
   try {
     const result=await executeAgent({operation:'probe',model:'default',input:{goal:'C'}},{provider:'codex',runtimePath,skillsDir:directory,workspaceDir:directory}) as {provider:string;skill:string;hasApiKey:boolean;workspace:string;cwd:string};
-    assert.deepEqual(result,{provider:'codex',skill:'knowledge-probe',hasApiKey:false,workspace:directory,cwd:await realpath(directory)});
+    const {cwd,...details}=result;
+    assert.deepEqual(details,{provider:'codex',skill:'knowledge-probe',hasApiKey:false,workspace:directory});
+    assert.equal(await realpath(cwd),await realpath(directory));
     assert.throws(()=>validateAgentRequest({operation:'probe',provider:'openai',model:'default',input:{}},'codex'));
     await assert.rejects(executeAgent({operation:'probe',model:'default',input:{}},{provider:'codex',runtimePath,skillsDir:directory,workspaceDir:'/missing'}),/workspace/);
   } finally {await rm(directory,{recursive:true,force:true})}
