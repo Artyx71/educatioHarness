@@ -36,11 +36,14 @@ jobs:
           xcrun simctl launch "$SIMULATOR" dev.educatioharness.desktop
           sleep 5
           xcrun simctl io "$SIMULATOR" screenshot "$RUNNER_TEMP/educatio-ios-first-launch.png"
+          sleep 35
+          xcrun simctl io "$SIMULATOR" screenshot "$RUNNER_TEMP/educatio-ios-after-load.png"
       - uses: actions/upload-artifact@v4
         with:
           name: educatioHarness-ios-simulator
           path: |
             src-tauri/gen/apple/build/arm64-sim/educatioHarness.app
             ${{ runner.temp }}/educatio-ios-first-launch.png
+            ${{ runner.temp }}/educatio-ios-after-load.png
           if-no-files-found: error
           retention-days: 7
